@@ -13,7 +13,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +22,7 @@ import (
 // Constants for the application
 const (
 	AppName    = "r3cond0g"
-	AppVersion = "1.0.0"
+	AppVersion = "0.0.1"
 	AppBanner  = `
  _____  _____               _  ___       
 |  __ \|___ /              | |/ _ \      
@@ -33,7 +32,7 @@ const (
 |_|  \_\_____|\___\___/ \__,_|\___/ \__, |
                                      __/ |
                                     |___/ 
-Advanced Network Reconnaissance Tool v1.0.0
+Advanced Network Reconnaissance Tool v0.0.1
 `
 )
 
