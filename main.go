@@ -4,24 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"flag"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
@@ -32,1553 +23,429 @@ import (
 
 // Constants
 const (
-	AppName        = "r3cond0g"
-	AppVersion     = "0.0.3 BETA"
-	AppAuthors     = "0xb0rn3 | 0xbv1"
-	AppConfigDir   = ".r3cond0g"
-	AppConfigFile  = "config.json"
-	DefaultTimeout = 3000 // ms
-	AppBanner      = `
-  _____ _____                              _   ___   _ _   _____
- |  __ \___ /                             | | / _ \ | | | /  ___|
- | |__) | |_ \ ___ ___  __ _ _ __ ___  __| | | | | || | | \ '--.
- |  _  /|___) / __/ _ \/ _' | '_ ' _ \/ _' | | | | |/ _' |  '--. \
- | | \ \____/ | (_| (_) | (_| | | | | | | (_| | | |_| | (_| | /\__/ /
- |_|  \_\_____|\___\___/\__,_|_| |_| |_|\__,_| \___/ \__, | \____/  %s
-                                                        __/ |
-                                                       |___/
-  Advanced Network Reconnaissance & Sniffing Tool
-  Authors: %s
-`
+	AppName    = "r3cond0g"
+	AppVersion = "1.0.0"
+	ConfigDir  = ".r3cond0g"
+	ConfigFile = "config.json"
 )
 
-// LogLevel defines logging verbosity levels
-type LogLevel int
-
-const (
-	LogInfo LogLevel = iota
-	LogDebug
-	LogWarn
-)
-
-var currentLogLevel = LogInfo
-
-// --- Data Structures ---
-type ScanResult struct {
-	IP                   string
-	Hostname             string
-	Ports                []PortInfo
-	OS                   string
-	Banners              map[int]string
-	PotentialVulns       []VulnerabilityInsight
-	NmapScriptResults    string
-	RustscanInitialPorts []string
-	WebDiscoveryResults  []WebDiscoveryResult
-}
-
-type PortInfo struct {
-	Port     int
-	Protocol string
-	Service  string
-	Version  string
-	State    string
-}
-
-type VulnerabilityInsight struct {
-	Port        int
-	ServiceName string
-	Version     string
-	Insight     string
-	Severity    string
-	Reference   string
-	Source      string
-}
-
-type WebDiscoveryResult struct {
-	URL        string
-	StatusCode int
-	Title      string
-	Length     int64
-	Found      bool
-}
-
-type SnifferRunSummary struct {
-	Interface     string
-	Filter        string
-	PacketsSeen   int
-	TCPSummary    map[string]int
-	UDPSummary    map[string]int
-	DNSSummary    []string
-	HTTPSummary   []string
-	FTPSummary    []string
-	TelnetSummary []string
-	PcapFile      string
-	StartTime     time.Time
-	EndTime       time.Time
-	Errors        []string
-}
-
+// Config holds tool configuration
 type Config struct {
-	Targets             string
-	Ports               string
-	ScanType            string
-	Threads             int
-	Timeout             int
-	OutputFile          string
-	OutputFormat        string
-	Verbose             bool
-	ServiceScan         bool
-	OsScan              bool
-	ScriptScan          bool
-	CustomNmapArgs      string
-	UseRustScan         bool
-	TargetFile          string
-	CommonPorts         bool
-	AllPorts            bool
-	BannerGrab          bool
-	VulnInsightScan     bool
-	CustomVulnDBFile    string
-	WebDiscoveryEnabled bool
-	WebWordlistFile     string
-	SniffInterface      string
-	SniffDuration       int
-	SniffBPFFilter      string
-	SniffPcapFile       string
-	SaveConfigOnExit    bool
+	Targets      string   `json:"targets"`
+	Ports        string   `json:"ports"`
+	Timeout      int      `json:"timeout"`
+	OutputFile   string   `json:"output_file"`
+	OutputFormat string   `json:"output_format"`
+	SniffIface   string   `json:"sniff_iface"`
+	SniffFilter  string   `json:"sniff_filter"`
+	SniffPcap    string   `json:"sniff_pcap"`
+	SniffTimeout int      `json:"sniff_timeout"`
+	Threads      int      `json:"threads"`
+	Verbose      bool     `json:"verbose"`
 }
 
-// Nmap XML parsing structures
-type NmapRun struct {
-	XMLName  xml.Name `xml:"nmaprun"`
-	Hosts    []Host   `xml:"host"`
-	ScanInfo ScanInfo `xml:"scaninfo"`
+// ScanResult holds port scanning results
+type ScanResult struct {
+	IP      string       `json:"ip"`
+	Ports   []PortInfo   `json:"ports"`
+	Banners map[int]string `json:"banners"`
 }
 
-type ScanInfo struct {
-	Type        string `xml:"type,attr"`
-	Protocol    string `xml:"protocol,attr"`
-	NumServices string `xml:"numservices,attr"`
-	Services    string `xml:"services,attr"`
+// PortInfo describes an open port
+type PortInfo struct {
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	Service  string `json:"service"`
 }
 
-type Host struct {
-	XMLName   xml.Name    `xml:"host"`
-	Status    Status      `xml:"status"`
-	Address   Address     `xml:"address"`
-	Hostnames []Hostname  `xml:"hostnames>hostname"`
-	Ports     NmapPorts   `xml:"ports"`
-	OS        OS          `xml:"os"`
-	Trace     Trace       `xml:"trace"`
+// SniffSummary holds packet sniffing results
+type SniffSummary struct {
+	Interface   string            `json:"interface"`
+	Filter      string            `json:"filter"`
+	Packets     int               `json:"packets"`
+	TCPSummary  map[string]int    `json:"tcp_summary"`
+	UDPSummary  map[string]int    `json:"udp_summary"`
+	DNSSummary  []string          `json:"dns_summary"`
+	HTTPSummary []string          `json:"http_summary"`
+	PcapFile    string            `json:"pcap_file"`
+	Errors      []string          `json:"errors"`
+	StartTime   time.Time         `json:"start_time"`
+	EndTime     time.Time         `json:"end_time"`
 }
 
-type Status struct {
-	State     string `xml:"state,attr"`
-	Reason    string `xml:"reason,attr"`
-	ReasonTTL string `xml:"reason_ttl,attr"`
-}
+// Global configuration
+var config Config
 
-type Address struct {
-	XMLName  xml.Name `xml:"address"`
-	Addr     string   `xml:"addr,attr"`
-	AddrType string   `xml:"addrtype,attr"`
-	Vendor   string   `xml:"vendor,attr"`
-}
-
-type Hostname struct {
-	Name string `xml:"name,attr"`
-	Type string `xml:"type,attr"`
-}
-
-type NmapPorts struct {
-	XMLName xml.Name   `xml:"ports"`
-	Ports   []NmapPort `xml:"port"`
-}
-
-type NmapPort struct {
-	XMLName  xml.Name    `xml:"port"`
-	Protocol string      `xml:"protocol,attr"`
-	PortID   string      `xml:"portid,attr"`
-	State    NmapState   `xml:"state"`
-	Service  NmapService `xml:"service"`
-	Scripts  []NmapScript `xml:"script"`
-}
-
-type NmapState struct {
-	XMLName   xml.Name `xml:"state"`
-	State     string   `xml:"state,attr"`
-	Reason    string   `xml:"reason,attr"`
-	ReasonTTL string   `xml:"reason_ttl,attr"`
-}
-
-type NmapService struct {
-	XMLName     xml.Name `xml:"service"`
-	Name        string   `xml:"name,attr"`
-	Product     string   `xml:"product,attr"`
-	Version     string   `xml:"version,attr"`
-	ExtraInfo   string   `xml:"extrainfo,attr"`
-	Method      string   `xml:"method,attr"`
-	Conf        string   `xml:"conf,attr"`
-	CPEs        []string `xml:"cpe"`
-	ServiceFP   string   `xml:"servicefp,attr"`
-	Tunnel      string   `xml:"tunnel,attr"`
-	Proto       string   `xml:"proto,attr"`
-	RPCType     string   `xml:"rpcnum,attr"`
-	Hostname    string   `xml:"hostname,attr"`
-	OSType      string   `xml:"ostype,attr"`
-	DeviceType  string   `xml:"devicetype,attr"`
-}
-
-type NmapScript struct {
-	ID     string `xml:"id,attr"`
-	Output string `xml:"output,attr"`
-}
-
-type OS struct {
-	XMLName       xml.Name      `xml:"os"`
-	OsMatches     []OsMatch     `xml:"osmatch"`
-	OsFingerprint OsFingerprint `xml:"osfingerprint"`
-	PortsUsed     []PortUsed    `xml:"portused"`
-}
-
-type PortUsed struct {
-	State  string `xml:"state,attr"`
-	Proto  string `xml:"proto,attr"`
-	PortID string `xml:"portid,attr"`
-}
-
-type OsMatch struct {
-	XMLName   xml.Name   `xml:"osmatch"`
-	Name      string     `xml:"name,attr"`
-	Accuracy  string     `xml:"accuracy,attr"`
-	Line      string     `xml:"line,attr"`
-	OSClasses []OSClass  `xml:"osclass"`
-}
-
-type OSClass struct {
-	XMLName   xml.Name `xml:"osclass"`
-	Type      string   `xml:"type,attr"`
-	Vendor    string   `xml:"vendor,attr"`
-	OSFamily  string   `xml:"osfamily,attr"`
-	OSGen     string   `xml:"osgen,attr"`
-	Accuracy  string   `xml:"accuracy,attr"`
-	CPEs      []string `xml:"cpe"`
-}
-
-type OsFingerprint struct {
-	XMLName     xml.Name `xml:"osfingerprint"`
-	Fingerprint string   `xml:"fingerprint,attr"`
-}
-
-type Trace struct {
-	XMLName xml.Name `xml:"trace"`
-	Proto   string   `xml:"proto,attr"`
-	Port    string   `xml:"port,attr"`
-	Hops    []Hop    `xml:"hop"`
-}
-
-type Hop struct {
-	TTL   string `xml:"ttl,attr"`
-	RTT   string `xml:"rtt,attr"`
-	IPAddr string `xml:"ipaddr,attr"`
-	Host   string `xml:"host,attr"`
-}
-
-// --- Global Variables ---
-var (
-	globalConfig     Config
-	configFilePath   string
-	internalVulnDB   = make(map[string]map[string]VulnerabilityInsight)
-	customVulnDB     = make(map[string]map[string]VulnerabilityInsight)
-	defaultWebWordlist = []string{
-		"/", "/index.html", "/index.php", "/index.jsp", "/robots.txt", "/sitemap.xml",
-		"/.git/config", "/.git/HEAD", "/.svn/entries", "/.DS_Store",
-		"/.env", "/env.txt", "/config.js", "/config.json", "/settings.py",
-		"/admin", "/login", "/dashboard", "/backup", "/tmp", "/temp",
-		"/uploads", "/static", "/assets", "/includes", "/cgi-bin/",
-		"/phpmyadmin/", "/pma/", "/webdav/", "/conf/", "/config/",
-		"/api/v1/users", "/api/v2/status", "/.well-known/security.txt",
-		"/README", "/readme.md", "/INSTALL", "/LICENSE", "/CHANGELOG",
-		"/flag.txt", "/flag", "/secret.txt", "/admin.php~", "/config.php.bak",
-		"/cmd.php", "/shell.php", "/test.php", "/info.php",
-	}
-	commonPortsList = "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1024-1029,1433,1521,1723,3306,3389,5432,5800,5900,6379,8000,8009,8080,8443,9200,9300,27017,11211"
-	allPortsRange   = "1-65535"
-)
-
-// --- Initialization ---
+// init sets default configuration
 func init() {
-	internalVulnDB = map[string]map[string]VulnerabilityInsight{
-		"ftp": {
-			"vsftpd 2.3.4":    {Insight: "Known backdoor vulnerability.", Severity: "Critical", Reference: "CVE-2011-2523", Source: "internal"},
-			"ProFTPD 1.3.5":   {Insight: "mod_copy Arbitrary File Copy.", Severity: "High", Reference: "CVE-2015-3306", Source: "internal"},
-			"Pure-FTPd":       {Insight: "Check for specific version vulnerabilities.", Severity: "Medium", Reference: "Search CVEs", Source: "internal"},
-			"*":               {Insight: "FTP transmits credentials in cleartext. Check for anonymous access.", Severity: "Medium", Reference: "CWE-319", Source: "internal"},
-		},
-		"ssh": {
-			"OpenSSH <7.7":   {Insight: "User enumeration via packet timing.", Severity: "Medium", Reference: "CVE-2018-15473", Source: "internal"},
-			"OpenSSH <8.5":   {Insight: "Potential regex DoS in ssh-add.", Severity: "Low", Reference: "CVE-2021-28041", Source: "internal"},
-			"Dropbear sshd": {Insight: "Check specific version for vulns.", Severity: "Medium", Reference: "Search Dropbear CVEs", Source: "internal"},
-		},
-		"telnet": {"*": {Insight: "Telnet is insecure (plaintext credentials).", Severity: "High", Reference: "CWE-319", Source: "internal"}},
-		"smtp":   {"*": {Insight: "Check for open relay, EXPN/VRFY commands.", Severity: "Medium", Reference: "CWE-200", Source: "internal"}},
-		"http": {
-			"Apache httpd 2.4.49": {Insight: "Path Traversal & RCE.", Severity: "Critical", Reference: "CVE-2021-41773", Source: "internal"},
-			"Apache httpd 2.4.50": {Insight: "Path Traversal (incomplete fix).", Severity: "Critical", Reference: "CVE-2021-42013", Source: "internal"},
-			"nginx <1.20.1":       {Insight: "Off-by-one in resolver.", Severity: "Medium", Reference: "CVE-2021-23017", Source: "internal"},
-			"Microsoft IIS 7.5":  {Insight: "Old version, check patch level.", Severity: "High", Reference: "Search IIS 7.5 CVEs", Source: "internal"},
-			"Tomcat":             {Insight: "Check default credentials for manager console.", Severity: "High", Reference: "CVE-2020-1938", Source: "internal"},
-			"PHP":                {Insight: "Check version for specific vulns.", Severity: "High", Reference: "php.net/releases", Source: "internal"},
-		},
-		"https":        {"*": {Insight: "Check for SSL/TLS misconfigurations.", Severity: "Medium", Reference: "SSL Labs Test", Source: "internal"}},
-		"smb":         {"*": {Insight: "Check anonymous access, MS17-010 (EternalBlue).", Severity: "Critical", Reference: "MS17-010", Source: "internal"}},
-		"mysql":       {"*": {Insight: "Default/weak credentials.", Severity: "High", Reference: "CVE-2012-2122", Source: "internal"}},
-		"postgresql":  {"*": {Insight: "Default/weak credentials.", Severity: "High", Reference: "CVE-2019-9193", Source: "internal"}},
-		"rdp":         {"*": {Insight: "BlueKeep for unpatched systems.", Severity: "Critical", Reference: "CVE-2019-0708", Source: "internal"}},
-		"vnc":         {"*": {Insight: "Check for no authentication or weak passwords.", Severity: "High", Reference: "CWE-287", Source: "internal"}},
-		"mongodb":     {"*": {Insight: "Default config often allows unauthenticated access.", Severity: "Critical", Reference: "CWE-284", Source: "internal"}},
-		"redis":       {"*": {Insight: "Default config often allows unauthenticated access.", Severity: "Critical", Reference: "CWE-284", Source: "internal"}},
-		"elasticsearch": {"*": {Insight: "Older versions had RCE.", Severity: "High", Reference: "CVE-2014-3120", Source: "internal"}},
-		"jenkins":     {"*": {Insight: "Check for unauthenticated access to /script console.", Severity: "Critical", Reference: "CWE-284", Source: "internal"}},
-		"docker":      {"*": {Insight: "Exposed Docker API can lead to compromise.", Severity: "Critical", Reference: "CWE-284", Source: "internal"}},
-	}
+	config.Timeout = 3000
+	config.OutputFormat = "text"
+	config.Threads = 10
+	config.SniffTimeout = 60
+	config.Verbose = false
 }
 
-// --- Main Application Logic ---
+// main is the entry point
 func main() {
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		configFilePath = filepath.Join(homeDir, AppConfigDir, AppConfigFile)
-	}
-	if !loadConfiguration(&globalConfig, configFilePath) {
-		setDefaultConfig(&globalConfig)
-	}
-	if globalConfig.CustomVulnDBFile != "" {
-		loadCustomVulnerabilities(globalConfig.CustomVulnDBFile)
+	// Parse command-line flags
+	parseFlags()
+
+	// Load configuration from file
+	loadConfig()
+
+	// Validate configuration
+	if config.Targets == "" && config.SniffIface == "" {
+		log.Fatal("Error: Specify targets or sniffing interface")
 	}
 
-	flag.StringVar(&globalConfig.Targets, "targets", globalConfig.Targets, "Target specification (CIDR, IP range, or comma-separated IPs)")
-	flag.StringVar(&globalConfig.TargetFile, "file", globalConfig.TargetFile, "Path to a file containing a list of targets")
-	flag.StringVar(&globalConfig.Ports, "ports", globalConfig.Ports, "Port specification (e.g., 80,443,8080 or 1-1000)")
-	flag.BoolVar(&globalConfig.CommonPorts, "common-ports", globalConfig.CommonPorts, "Scan common ports")
-	flag.BoolVar(&globalConfig.AllPorts, "all-ports", globalConfig.AllPorts, "Scan all 65535 ports")
-	flag.StringVar(&globalConfig.ScanType, "scan", globalConfig.ScanType, "Nmap scan type (SYN, CONNECT, TCP, UDP, NULL, FIN, XMAS, AGGRESSIVE, COMPREHENSIVE)")
-	flag.IntVar(&globalConfig.Threads, "threads", globalConfig.Threads, "Number of concurrent threads")
-	flag.IntVar(&globalConfig.Timeout, "timeout", globalConfig.Timeout, "Timeout in milliseconds for individual probes")
-	flag.StringVar(&globalConfig.OutputFile, "output", globalConfig.OutputFile, "Output file name (prefix, format will be appended)")
-	flag.StringVar(&globalConfig.OutputFormat, "format", globalConfig.OutputFormat, "Output format (text, json, html)")
-	flag.BoolVar(&globalConfig.Verbose, "verbose", globalConfig.Verbose, "Enable verbose output")
-	flag.BoolVar(&globalConfig.ServiceScan, "service", globalConfig.ServiceScan, "Enable Nmap service detection (-sV)")
-	flag.BoolVar(&globalConfig.OsScan, "os", globalConfig.OsScan, "Enable Nmap OS detection (-O)")
-	flag.BoolVar(&globalConfig.ScriptScan, "script", globalConfig.ScriptScan, "Enable Nmap default script scanning (--script=default)")
-	flag.StringVar(&globalConfig.CustomNmapArgs, "custom", globalConfig.CustomNmapArgs, "Custom nmap arguments (sanitized)")
-	flag.BoolVar(&globalConfig.UseRustScan, "rustscan", globalConfig.UseRustScan, "Use rustscan for initial fast port discovery")
-	flag.BoolVar(&globalConfig.BannerGrab, "banners", globalConfig.BannerGrab, "Attempt to grab banners from open TCP ports")
-	flag.BoolVar(&globalConfig.VulnInsightScan, "vuln-insights", globalConfig.VulnInsightScan, "Enable basic vulnerability insights")
-	flag.StringVar(&globalConfig.CustomVulnDBFile, "custom-vuln-db", globalConfig.CustomVulnDBFile, "Path to custom vulnerability DB JSON file")
-	flag.BoolVar(&globalConfig.WebDiscoveryEnabled, "web-discover", globalConfig.WebDiscoveryEnabled, "Enable basic web directory/file discovery")
-	flag.StringVar(&globalConfig.WebWordlistFile, "web-wordlist", globalConfig.WebWordlistFile, "Path to custom wordlist for web discovery")
-	flag.StringVar(&globalConfig.SniffInterface, "sniff-iface", globalConfig.SniffInterface, "Network interface for sniffing")
-	flag.IntVar(&globalConfig.SniffDuration, "sniff-duration", globalConfig.SniffDuration, "Duration for sniffing in seconds (0 for indefinite)")
-	flag.StringVar(&globalConfig.SniffBPFFilter, "sniff-filter", globalConfig.SniffBPFFilter, "BPF filter for sniffing")
-	flag.StringVar(&globalConfig.SniffPcapFile, "sniff-pcap", globalConfig.SniffPcapFile, "File to save sniffed packets (e.g., capture.pcap)")
-	flag.BoolVar(&globalConfig.SaveConfigOnExit, "save-config", globalConfig.SaveConfigOnExit, "Save current settings to config file on exit")
-
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, AppBanner, AppVersion, AppAuthors)
-		fmt.Fprintf(os.Stderr, "\nUsage: %s [options] or run without options for interactive menu\n\n", AppName)
-		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -targets 192.168.1.0/24 -common-ports -service -os -vuln-insights -output scan_results\n", AppName)
-		fmt.Fprintf(os.Stderr, "  %s -file targets.txt -ports 80,443 -scan AGGRESSIVE -web-discover -format json\n", AppName)
-		fmt.Fprintf(os.Stderr, "  %s -sniff-iface eth0 -sniff-duration 120 -sniff-filter \"tcp port 80\" -sniff-pcap traffic.pcap\n", AppName)
-		fmt.Fprintf(os.Stderr, "  %s (interactive menu)\n", AppName)
-	}
-	flag.Parse()
-
-	fmt.Printf(AppBanner+"\n", AppVersion, AppAuthors)
-
-	if len(os.Args) == 1 {
-		runMenu()
+	// Run scanning or sniffing based on configuration
+	if config.SniffIface != "" {
+		summary := runPacketSniffer()
+		saveReport(summary)
 	} else {
-		if globalConfig.Targets == "" && globalConfig.TargetFile == "" && globalConfig.SniffInterface == "" {
-			fmt.Println("Error: No targets or sniffing interface specified via CLI.")
-			flag.Usage()
-			os.Exit(1)
-		}
-		if globalConfig.SniffInterface != "" {
-			runLiveSniffer(globalConfig.SniffInterface, globalConfig.SniffDuration, globalConfig.SniffBPFFilter, globalConfig.SniffPcapFile)
-		} else {
-			processScanRequest()
-		}
+		results := runPortScanner()
+		saveReport(results)
 	}
 }
 
-func setDefaultConfig(cfg *Config) {
-	cfg.ScanType = "SYN"
-	cfg.Threads = 10
-	cfg.Timeout = DefaultTimeout
-	cfg.OutputFormat = "text"
-	cfg.ServiceScan = true
-	cfg.OsScan = true
-	cfg.BannerGrab = true
-	cfg.UseRustScan = true
-	cfg.Ports = ""
-	cfg.SaveConfigOnExit = true
-	cfg.SniffDuration = 60
-	cfg.VulnInsightScan = true
-	cfg.WebDiscoveryEnabled = false
+// parseFlags handles command-line arguments
+func parseFlags() {
+	flag.StringVar(&config.Targets, "targets", "", "Comma-separated IPs or CIDR")
+	flag.StringVar(&config.Ports, "ports", "80,443,22,21", "Comma-separated ports")
+	flag.IntVar(&config.Timeout, "timeout", config.Timeout, "Timeout in ms")
+	flag.StringVar(&config.OutputFile, "output", "", "Output file prefix")
+	flag.StringVar(&config.OutputFormat, "format", config.OutputFormat, "Output format (text, json)")
+	flag.StringVar(&config.SniffIface, "sniff-iface", "", "Network interface for sniffing")
+	flag.StringVar(&config.SniffFilter, "sniff-filter", "", "BPF filter for sniffing")
+	flag.StringVar(&config.SniffPcap, "sniff-pcap", "", "PCAP output file")
+	flag.IntVar(&config.SniffTimeout, "sniff-timeout", config.SniffTimeout, "Sniffing duration in seconds")
+	flag.IntVar(&config.Threads, "threads", config.Threads, "Concurrent threads")
+	flag.BoolVar(&config.Verbose, "verbose", config.Verbose, "Enable verbose logging")
+	flag.Parse()
 }
 
-func logMessage(level LogLevel, format string, args ...interface{}) {
-	if globalConfig.Verbose && level >= currentLogLevel {
-		switch level {
-		case LogInfo:
-			fmt.Printf("[INFO] "+format, args...)
-		case LogDebug:
-			fmt.Printf("[DEBUG] "+format, args...)
-		case LogWarn:
-			fmt.Printf("[WARN] "+format, args...)
-		}
-	}
-}
-
-func runMenu() {
-	reader := bufio.NewReader(os.Stdin)
-	var input string
-	for {
-		fmt.Println("\n=== r3cond0g Menu v" + AppVersion + " ===")
-		targetDisplay := "Not Set"
-		if globalConfig.TargetFile != "" {
-			targetDisplay = fmt.Sprintf("File: %s", globalConfig.TargetFile)
-		} else if globalConfig.Targets != "" {
-			targetDisplay = globalConfig.Targets
-		}
-		fmt.Println("--- Scanning ---")
-		fmt.Println("1. Set Target(s) (Current: " + targetDisplay + ")")
-		fmt.Println("2. Set Ports (Current: " + getCurrentPortSetting() + ")")
-		fmt.Println("3. Set Nmap Scan Type (Current: " + globalConfig.ScanType + ")")
-		fmt.Println("4. Toggle Service Detection (-sV) (Current: " + boolToString(globalConfig.ServiceScan) + ")")
-		fmt.Println("5. Toggle OS Detection (-O) (Current: " + boolToString(globalConfig.OsScan) + ")")
-		fmt.Println("6. Toggle Nmap Default Scripts (Current: " + boolToString(globalConfig.ScriptScan) + ")")
-		fmt.Println("7. Toggle Banner Grabbing (Current: " + boolToString(globalConfig.BannerGrab) + ")")
-		fmt.Println("8. Toggle Use Rustscan (Current: " + boolToString(globalConfig.UseRustScan) + ")")
-		fmt.Println("9. Set Custom Nmap Arguments (Current: " + getCurrentSetting(globalConfig.CustomNmapArgs, "None") + ")")
-		fmt.Println("\n--- Analysis & Discovery ---")
-		fmt.Println("10. Toggle Vulnerability Insights (Current: " + boolToString(globalConfig.VulnInsightScan) + ")")
-		fmt.Println("11. Set Custom Vulnerability DB (Current: " + getCurrentSetting(globalConfig.CustomVulnDBFile, "None") + ")")
-		fmt.Println("12. Toggle Web Directory/File Discovery (Current: " + boolToString(globalConfig.WebDiscoveryEnabled) + ")")
-		fmt.Println("13. Set Web Discovery Wordlist (Current: " + getCurrentSetting(globalConfig.WebWordlistFile, "Internal Default") + ")")
-		fmt.Println("\n--- Sniffing ---")
-		fmt.Println("14. Set Sniffing Interface (Current: " + getCurrentSetting(globalConfig.SniffInterface, "None") + ")")
-		fmt.Println("15. Set Sniffing Duration (s, 0=inf) (Current: " + strconv.Itoa(globalConfig.SniffDuration) + ")")
-		fmt.Println("16. Set Sniffing BPF Filter (Current: " + getCurrentSetting(globalConfig.SniffBPFFilter, "None") + ")")
-		fmt.Println("17. Set Sniffing PCAP Output File (Current: " + getCurrentSetting(globalConfig.SniffPcapFile, "None") + ")")
-		fmt.Println("18. List Network Interfaces")
-		fmt.Println("P. Start Live Packet Sniffing")
-		fmt.Println("\n--- Output & Settings ---")
-		fmt.Println("19. Set Output File Prefix (Current: " + getCurrentSetting(globalConfig.OutputFile, "Not Set") + ")")
-		fmt.Println("20. Set Output Format (Current: " + globalConfig.OutputFormat + ") (text, json, html)")
-		fmt.Println("21. Set Threads (Current: " + strconv.Itoa(globalConfig.Threads) + ")")
-		fmt.Println("22. Set Probe Timeout (ms) (Current: " + strconv.Itoa(globalConfig.Timeout) + ")")
-		fmt.Println("23. Toggle Verbose Output (Current: " + boolToString(globalConfig.Verbose) + ")")
-		fmt.Println("24. Save Current Configuration")
-		fmt.Println("25. Load Configuration from File")
-		fmt.Println("26. Toggle Save Config on Exit (Current: " + boolToString(globalConfig.SaveConfigOnExit) + ")")
-		fmt.Println("\nS. Start Scan")
-		fmt.Println("Q. Quit")
-		fmt.Print("Enter your choice: ")
-
-		input, _ = reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToUpper(input))
-		switch input {
-		case "1":
-			fmt.Println("Set Targets: (1) Direct Input, (2) From File")
-			fmt.Print("Choice: ")
-			subInput, _ := reader.ReadString('\n')
-			subInput = strings.TrimSpace(subInput)
-			if subInput == "1" {
-				fmt.Print("Enter target(s): ")
-				globalConfig.Targets, _ = reader.ReadString('\n')
-				globalConfig.Targets = strings.TrimSpace(globalConfig.Targets)
-				globalConfig.TargetFile = ""
-			} else if subInput == "2" {
-				fmt.Print("Enter path to target file: ")
-				globalConfig.TargetFile, _ = reader.ReadString('\n')
-				globalConfig.TargetFile = strings.TrimSpace(globalConfig.TargetFile)
-				globalConfig.Targets = ""
-			}
-		case "2":
-			configurePorts(reader)
-		case "3":
-			fmt.Print("Enter Nmap scan type: ")
-			scanTypeInput, _ := reader.ReadString('\n')
-			globalConfig.ScanType = strings.TrimSpace(strings.ToUpper(scanTypeInput))
-		case "4":
-			globalConfig.ServiceScan = !globalConfig.ServiceScan
-		case "5":
-			globalConfig.OsScan = !globalConfig.OsScan
-		case "6":
-			globalConfig.ScriptScan = !globalConfig.ScriptScan
-		case "7":
-			globalConfig.BannerGrab = !globalConfig.BannerGrab
-		case "8":
-			globalConfig.UseRustScan = !globalConfig.UseRustScan
-		case "9":
-			fmt.Print("Enter custom Nmap arguments: ")
-			customArgs, _ := reader.ReadString('\n')
-			globalConfig.CustomNmapArgs = sanitizeNmapArgs(strings.TrimSpace(customArgs))
-		case "10":
-			globalConfig.VulnInsightScan = !globalConfig.VulnInsightScan
-		case "11":
-			fmt.Print("Enter path to custom vuln DB JSON (blank to clear): ")
-			fileInput, _ := reader.ReadString('\n')
-			globalConfig.CustomVulnDBFile = strings.TrimSpace(fileInput)
-			if globalConfig.CustomVulnDBFile != "" {
-				loadCustomVulnerabilities(globalConfig.CustomVulnDBFile)
-			} else {
-				customVulnDB = make(map[string]map[string]VulnerabilityInsight)
-				fmt.Println("Custom vuln DB cleared.")
-			}
-		case "12":
-			globalConfig.WebDiscoveryEnabled = !globalConfig.WebDiscoveryEnabled
-		case "13":
-			fmt.Print("Enter path to web wordlist (blank for default): ")
-			fileInput, _ := reader.ReadString('\n')
-			globalConfig.WebWordlistFile = strings.TrimSpace(fileInput)
-		case "14":
-			fmt.Print("Enter sniff interface ('list' to see options): ")
-			ifaceInput, _ := reader.ReadString('\n')
-			ifaceInput = strings.TrimSpace(ifaceInput)
-			if strings.ToLower(ifaceInput) == "list" {
-				listNetworkInterfaces()
-				fmt.Print("Enter interface name: ")
-				ifaceInput2, _ := reader.ReadString('\n')
-				globalConfig.SniffInterface = strings.TrimSpace(ifaceInput2)
-			} else {
-				globalConfig.SniffInterface = ifaceInput
-			}
-		case "15":
-			fmt.Print("Enter sniff duration (s, 0=inf): ")
-			durStr, _ := reader.ReadString('\n')
-			dur, err := strconv.Atoi(strings.TrimSpace(durStr))
-			if err == nil && dur >= 0 {
-				globalConfig.SniffDuration = dur
-			} else {
-				fmt.Println("Invalid duration.")
-			}
-		case "16":
-			fmt.Print("Enter BPF filter (blank for none): ")
-			globalConfig.SniffBPFFilter, _ = reader.ReadString('\n')
-			globalConfig.SniffBPFFilter = strings.TrimSpace(globalConfig.SniffBPFFilter)
-		case "17":
-			fmt.Print("Enter PCAP output file (blank for no save): ")
-			globalConfig.SniffPcapFile, _ = reader.ReadString('\n')
-			globalConfig.SniffPcapFile = strings.TrimSpace(globalConfig.SniffPcapFile)
-		case "18":
-			listNetworkInterfaces()
-		case "P":
-			if globalConfig.SniffInterface == "" {
-				fmt.Println("Sniffing interface not set.")
-				continue
-			}
-			runLiveSniffer(globalConfig.SniffInterface, globalConfig.SniffDuration, globalConfig.SniffBPFFilter, globalConfig.SniffPcapFile)
-		case "19":
-			fmt.Print("Enter output file prefix: ")
-			globalConfig.OutputFile, _ = reader.ReadString('\n')
-			globalConfig.OutputFile = strings.TrimSpace(globalConfig.OutputFile)
-		case "20":
-			fmt.Print("Enter output format (text, json, html): ")
-			formatInput, _ := reader.ReadString('\n')
-			formatInput = strings.TrimSpace(strings.ToLower(formatInput))
-			if formatInput == "text" || formatInput == "json" || formatInput == "html" {
-				globalConfig.OutputFormat = formatInput
-			} else {
-				fmt.Println("Invalid format.")
-				globalConfig.OutputFormat = "text"
-			}
-		case "21":
-			fmt.Print("Enter threads: ")
-			threadsStr, _ := reader.ReadString('\n')
-			threads, err := strconv.Atoi(strings.TrimSpace(threadsStr))
-			if err == nil && threads > 0 {
-				globalConfig.Threads = threads
-			} else {
-				fmt.Println("Invalid thread count.")
-			}
-		case "22":
-			fmt.Print("Enter probe timeout (ms): ")
-			timeoutStr, _ := reader.ReadString('\n')
-			timeout, err := strconv.Atoi(strings.TrimSpace(timeoutStr))
-			if err == nil && timeout > 0 {
-				globalConfig.Timeout = timeout
-			} else {
-				fmt.Println("Invalid timeout.")
-			}
-		case "23":
-			globalConfig.Verbose = !globalConfig.Verbose
-			if globalConfig.Verbose {
-				currentLogLevel = LogDebug
-			} else {
-				currentLogLevel = LogInfo
-			}
-		case "24":
-			if saveConfiguration(globalConfig, configFilePath) {
-				fmt.Println("Config saved.")
-			}
-		case "25":
-			if loadConfiguration(&globalConfig, configFilePath) {
-				fmt.Println("Config loaded.")
-			}
-		case "26":
-			globalConfig.SaveConfigOnExit = !globalConfig.SaveConfigOnExit
-		case "S":
-			processScanRequest()
-		case "Q":
-			if globalConfig.SaveConfigOnExit {
-				if saveConfiguration(globalConfig, configFilePath) {
-					fmt.Println("Config saved.")
-				}
-			}
-			fmt.Println("Exiting r3cond0g.")
-			return
-		default:
-			fmt.Println("Invalid choice.")
-		}
-	}
-}
-
-func configurePorts(reader *bufio.Reader) {
-	fmt.Println("Select port option:")
-	fmt.Println("   a. Specify ports (e.g., 80,443,1-100)")
-	fmt.Println("   b. Scan common ports (uses internal list: " + commonPortsList + ")")
-	fmt.Println("   c. Scan all ports (1-65535)")
-	fmt.Println("   d. Nmap default (top 1000 ports)")
-	fmt.Print("Enter your choice: ")
-	portChoice, _ := reader.ReadString('\n')
-	portChoice = strings.TrimSpace(strings.ToLower(portChoice))
-	switch portChoice {
-	case "a":
-		fmt.Print("Enter port specification: ")
-		globalConfig.Ports, _ = reader.ReadString('\n')
-		globalConfig.Ports = strings.TrimSpace(globalConfig.Ports)
-		globalConfig.CommonPorts = false
-		globalConfig.AllPorts = false
-	case "b":
-		globalConfig.Ports = ""
-		globalConfig.CommonPorts = true
-		globalConfig.AllPorts = false
-		fmt.Println("Common ports selected.")
-	case "c":
-		globalConfig.Ports = ""
-		globalConfig.CommonPorts = false
-		globalConfig.AllPorts = true
-		fmt.Println("All ports selected.")
-	case "d":
-		globalConfig.Ports = ""
-		globalConfig.CommonPorts = false
-		globalConfig.AllPorts = false
-		fmt.Println("Nmap default ports selected.")
-	default:
-		fmt.Println("Invalid choice. Port settings unchanged.")
-	}
-}
-
-func getCurrentSetting(setting string, defaultVal string) string {
-	if setting == "" {
-		return defaultVal
-	}
-	return setting
-}
-
-func getCurrentPortSetting() string {
-	if globalConfig.AllPorts {
-		return "All Ports (1-65535)"
-	}
-	if globalConfig.CommonPorts {
-		return "Common Ports (Internal List)"
-	}
-	if globalConfig.Ports != "" {
-		return globalConfig.Ports
-	}
-	return "Nmap Default (Top 1000)"
-}
-
-func boolToString(b bool) string {
-	if b {
-		return "Enabled"
-	}
-	return "Disabled"
-}
-
-func loadTargetsFromFile(filename string) ([]string, error) {
-	var targets []string
-	file, err := os.Open(filename)
+// loadConfig loads configuration from JSON file
+func loadConfig() {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		target := strings.TrimSpace(scanner.Text())
-		if target != "" && !strings.HasPrefix(target, "#") {
-			targets = append(targets, target)
-		}
-	}
-	return targets, scanner.Err()
-}
-
-func saveConfiguration(config Config, filePath string) bool {
-	if filePath == "" {
-		fmt.Println("Error: Config file path not set.")
-		return false
-	}
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		fmt.Printf("Error marshalling config: %s\n", err)
-		return false
-	}
-	dir := filepath.Dir(filePath)
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			fmt.Printf("Error creating config dir %s: %s\n", dir, err)
-			return false
-		}
-	}
-	err = os.WriteFile(filePath, data, 0640)
-	if err != nil {
-		fmt.Printf("Error writing config to %s: %s\n", filePath, err)
-		return false
-	}
-	return true
-}
-
-func loadConfiguration(config *Config, filePath string) bool {
-	if filePath == "" {
-		return false
-	}
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return false
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		fmt.Printf("Error reading config from %s: %s. Using defaults.\n", filePath, err)
-		return false
-	}
-	err = json.Unmarshal(data, config)
-	if err != nil {
-		fmt.Printf("Error unmarshalling config from %s: %s. Using defaults.\n", filePath, err)
-		return false
-	}
-	fmt.Println("Configuration loaded from", filePath)
-	return true
-}
-
-func sanitizeNmapArgs(args string) string {
-	// Whitelist of safe Nmap arguments to prevent command injection
-	safeArgs := []string{
-		"-sS", "-sT", "-sU", "-sN", "-sF", "-sX", "-A", "-sV", "-O",
-		"--script=default", "--version-intensity", "-T", "--host-timeout",
-		"-v", "-p", "-n", "--dns-servers", "--max-retries", "--min-rate",
-	}
-	var sanitized []string
-	for _, arg := range strings.Fields(args) {
-		for _, safe := range safeArgs {
-			if strings.HasPrefix(arg, safe) {
-				sanitized = append(sanitized, arg)
-				break
-			}
-		}
-	}
-	return strings.Join(sanitized, " ")
-}
-
-func processScanRequest() {
-	var targetsToScan []string
-	if globalConfig.TargetFile != "" {
-		fileTargets, err := loadTargetsFromFile(globalConfig.TargetFile)
-		if err != nil {
-			fmt.Printf("Error loading targets from file '%s': %s\n", globalConfig.TargetFile, err)
-			return
-		}
-		targetsToScan = append(targetsToScan, fileTargets...)
-	} else if globalConfig.Targets != "" {
-		targetsToScan = strings.Split(globalConfig.Targets, ",")
-		for i := range targetsToScan {
-			targetsToScan[i] = strings.TrimSpace(targetsToScan[i])
-		}
-	}
-	if len(targetsToScan) == 0 {
-		fmt.Println("No targets specified.")
 		return
 	}
-	logMessage(LogInfo, "Targets to scan: %v\n", targetsToScan)
-	results := runScansConcurrently(globalConfig, targetsToScan)
-	displayScanResults(results)
-	if globalConfig.OutputFile != "" {
-		saveScanResults(results, globalConfig.OutputFile, globalConfig.OutputFormat)
+	configPath := filepath.Join(home, ConfigDir, ConfigFile)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		log.Printf("Warning: Failed to parse config: %v", err)
 	}
 }
 
-func runScansConcurrently(config Config, targets []string) []ScanResult {
-	logMessage(LogInfo, "\n=== Starting Scan ===\n")
-	var allResults []ScanResult
+// saveConfig saves configuration to JSON file
+func saveConfig() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	configPath := filepath.Join(home, ConfigDir, ConfigFile)
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		log.Printf("Warning: Failed to marshal config: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0750); err != nil {
+		log.Printf("Warning: Failed to create config dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(configPath, data, 0640); err != nil {
+		log.Printf("Warning: Failed to write config: %v", err)
+	}
+}
+
+// runPortScanner performs TCP port scanning and banner grabbing
+func runPortScanner() []ScanResult {
+	log.Println("Starting port scan...")
+	targets := strings.Split(config.Targets, ",")
+	var results []ScanResult
 	var wg sync.WaitGroup
-	var mutex sync.Mutex
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	var mu sync.Mutex
 	sem := make(chan struct{}, config.Threads)
 
 	for _, target := range targets {
+		target = strings.TrimSpace(target)
 		if target == "" {
 			continue
 		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(currentTarget string, currentConfig Config, parentCtx context.Context) {
+		go func(t string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			opCtx, opCancel := context.WithTimeout(parentCtx, time.Duration(currentConfig.Timeout*20)*time.Millisecond)
-			defer opCancel()
+			result := scanTarget(t)
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		}(target)
+	}
+	wg.Wait()
+	log.Println("Port scan completed")
+	return results
+}
 
-			var targetNmapResults []ScanResult
-			var rustscanPorts []string
-			nmapAvailable := isCommandAvailable("nmap")
-			rustscanAvailable := isCommandAvailable("rustscan")
-			if !nmapAvailable {
-				logMessage(LogWarn, "[%s] Nmap not found.\n", currentTarget)
+// scanTarget scans a single target for open ports and banners
+func scanTarget(target string) ScanResult {
+	result := ScanResult{
+		IP:      target,
+		Ports:   []PortInfo{},
+		Banners: make(map[int]string),
+	}
+	ports := parsePorts(config.Ports)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, port := range ports {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			addr := fmt.Sprintf("%s:%d", target, p)
+			conn, err := net.DialTimeout("tcp", addr, time.Duration(config.Timeout)*time.Millisecond)
+			if err != nil {
 				return
 			}
-			currentConfig.Targets = currentTarget
-
-			if currentConfig.UseRustScan && rustscanAvailable {
-				logMessage(LogDebug, "[%s] Rustscan phase...\n", currentTarget)
-				discoveredPorts := runRustScan(opCtx, currentConfig)
-				if len(discoveredPorts) > 0 {
-					rustscanPorts = discoveredPorts
-					logMessage(LogDebug, "[%s] Rustscan found: %s. Nmap detail phase...\n", currentTarget, strings.Join(rustscanPorts, ","))
-					nmapConfig := currentConfig
-					nmapConfig.Ports = strings.Join(rustscanPorts, ",")
-					nmapConfig.CommonPorts = false
-					nmapConfig.AllPorts = false
-					targetNmapResults = runNmapScan(opCtx, nmapConfig)
-				} else {
-					logMessage(LogDebug, "[%s] Rustscan: no open ports found.\n", currentTarget)
-				}
-			} else {
-				if currentConfig.UseRustScan && !rustscanAvailable {
-					logMessage(LogWarn, "[%s] Warning: Rustscan selected but not found. Using Nmap for all phases.\n", currentTarget)
-				}
-				logMessage(LogDebug, "[%s] Nmap direct scan phase...\n", currentTarget)
-				targetNmapResults = runNmapScan(opCtx, currentConfig)
+			defer conn.Close()
+			portInfo := PortInfo{Port: p, Protocol: "tcp", Service: guessService(p)}
+			mu.Lock()
+			result.Ports = append(result.Ports, portInfo)
+			mu.Unlock()
+			banner := grabBanner(conn, portInfo)
+			if banner != "" {
+				mu.Lock()
+				result.Banners[p] = banner
+				mu.Unlock()
 			}
-
-			processedNmapResults := make([]ScanResult, len(targetNmapResults))
-			for i, nmapResult := range targetNmapResults {
-				processedResult := nmapResult
-				processedResult.RustscanInitialPorts = rustscanPorts
-				if currentConfig.BannerGrab && len(processedResult.Ports) > 0 {
-					logMessage(LogDebug, "[%s] Banner grabbing phase...\n", processedResult.IP)
-					processedResult.Banners = grabBannersNative(processedResult.IP, processedResult.Ports, currentConfig.Timeout, currentConfig.Threads)
-				}
-				if currentConfig.VulnInsightScan && len(processedResult.Ports) > 0 {
-					logMessage(LogDebug, "[%s] Vulnerability insights phase...\n", processedResult.IP)
-					processedResult.PotentialVulns = checkVulnerabilityInsights(processedResult.Ports)
-				}
-				if currentConfig.WebDiscoveryEnabled && len(processedResult.Ports) > 0 {
-					logMessage(LogDebug, "[%s] Web discovery phase...\n", processedResult.IP)
-					processedResult.WebDiscoveryResults = runWebDiscoveryForHost(opCtx, processedResult, currentConfig)
-				}
-				processedNmapResults[i] = processedResult
-			}
-			mutex.Lock()
-			allResults = append(allResults, processedNmapResults...)
-			mutex.Unlock()
-		}(target, config, ctx)
+		}(port)
 	}
 	wg.Wait()
-	close(sem)
-	logMessage(LogInfo, "\n=== All Scans Completed ===\n")
-	return allResults
+	return result
 }
 
-func isCommandAvailable(cmdName string) bool {
-	return exec.Command("sh", "-c", "command -v "+cmdName).Run() == nil
-}
-
-func runRustScan(ctx context.Context, config Config) []string {
-	args := []string{"-a", config.Targets, "--ulimit", "5000", "--timeout", strconv.Itoa(config.Timeout), "--no-config", "--accessible"}
-	if config.AllPorts {
-		args = append(args, "-p", allPortsRange)
-	} else if config.CommonPorts {
-		args = append(args, "-p", commonPortsList)
-	} else if config.Ports != "" {
-		args = append(args, "-p", config.Ports)
-	} else {
-		args = append(args, "-p", "1-1000")
-	}
-	logMessage(LogDebug, "[%s] Rustscan command: rustscan %s\n", config.Targets, strings.Join(args, " "))
-	cmd := exec.CommandContext(ctx, "rustscan", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if ctx.Err() != nil {
-			logMessage(LogWarn, "[%s] Rustscan context error: %v\n", config.Targets, ctx.Err())
-			return []string{}
-		}
-		if exitErr, ok := err.(*exec.ExitError); ok && (exitErr.ExitCode() == 0 || exitErr.ExitCode() == 1) {
-			// Non-fatal
-		} else {
-			logMessage(LogWarn, "[%s] Error running Rustscan: %s\nOutput: %s\n", config.Targets, err, string(output))
-			return []string{}
+// parsePorts converts port string to list of integers
+func parsePorts(ports string) []int {
+	var result []int
+	for _, p := range strings.Split(ports, ",") {
+		p = strings.TrimSpace(p)
+		if port, err := strconv.Atoi(p); err == nil {
+			result = append(result, port)
 		}
 	}
-	return parseRustScanOutputImproved(string(output), config.Verbose)
+	return result
 }
 
-func parseRustScanOutputImproved(output string, verbose bool) []string {
-	var openPorts []string
-	seenPorts := make(map[string]bool)
-	re := regexp.MustCompile(`(?:Open\s+[\w.-]+:|\[â��\]\s*|Discovered\s+open\s+port\s+)(\d+)(?:/(?:tcp|udp))?`)
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		matches := re.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			portStr := matches[1]
-			if _, err := strconv.Atoi(portStr); err == nil {
-				if !seenPorts[portStr] {
-					openPorts = append(openPorts, portStr)
-					seenPorts[portStr] = true
-				}
-			}
-		}
-	}
-	if verbose && len(openPorts) > 0 {
-		logMessage(LogDebug, "Parsed Rustscan ports: %v\n", openPorts)
-	}
-	return openPorts
-}
-
-func runNmapScan(ctx context.Context, config Config) []ScanResult {
-	tmpFile, err := os.CreateTemp("", AppName+"_nmap_*.xml")
-	if err != nil {
-		logMessage(LogWarn, "[%s] Temp Nmap XML err: %s\n", config.Targets, err)
-		return []ScanResult{}
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-
-	args := []string{"-oX", tmpFile.Name()}
-	scanTypeArg := ""
-	switch strings.ToUpper(config.ScanType) {
-	case "SYN":
-		scanTypeArg = "-sS"
-	case "CONNECT":
-		scanTypeArg = "-sT"
-	case "TCP":
-		scanTypeArg = "-sT"
-	case "UDP":
-		scanTypeArg = "-sU"
-	case "NULL":
-		scanTypeArg = "-sN"
-	case "FIN":
-		scanTypeArg = "-sF"
-	case "XMAS":
-		scanTypeArg = "-sX"
-	case "AGGRESSIVE":
-		args = append(args, "-A")
-		config.ServiceScan, config.OsScan, config.ScriptScan = false, false, false
-	case "COMPREHENSIVE":
-		scanTypeArg = "-sS"
-		args = append(args, "-sV", "-O", "--script=default", "--version-intensity", "7")
-		config.ServiceScan, config.OsScan, config.ScriptScan = false, false, false
+// guessService maps ports to common services
+func guessService(port int) string {
+	switch port {
+	case 21:
+		return "ftp"
+	case 22:
+		return "ssh"
+	case 23:
+		return "telnet"
+	case 80:
+		return "http"
+	case 443:
+		return "https"
 	default:
-		scanTypeArg = "-sS"
+		return "unknown"
 	}
-	if scanTypeArg != "" {
-		args = append(args, scanTypeArg)
-	}
-	if config.AllPorts {
-		args = append(args, "-p-")
-	} else if config.CommonPorts {
-		args = append(args, "-p", commonPortsList)
-	} else if config.Ports != "" {
-		args = append(args, "-p", config.Ports)
-	}
-	if config.ServiceScan {
-		args = append(args, "-sV", "--version-intensity", "5")
-	}
-	if config.OsScan {
-		args = append(args, "-O")
-		if strings.ToUpper(config.ScanType) == "UDP" {
-			args = append(args, "--osscan-limit")
-		}
-	}
-	if config.ScriptScan {
-		args = append(args, "--script=default")
-	}
-	args = append(args, "-T"+strconv.Itoa(min(max(1, config.Threads/2), 5)))
-	args = append(args, "--host-timeout", strconv.Itoa(config.Timeout*10)+"ms")
-	if config.Verbose {
-		args = append(args, "-v")
-	}
-	if config.CustomNmapArgs != "" {
-		customArgs := strings.Fields(config.CustomNmapArgs)
-		args = append(args, customArgs...)
-	}
-	args = append(args, config.Targets)
-
-	logMessage(LogDebug, "[%s] Nmap command: nmap %s\n", config.Targets, strings.Join(args, " "))
-	cmd := exec.CommandContext(ctx, "nmap", args...)
-	var stdoutStderr strings.Builder
-	cmd.Stdout = &stdoutStderr
-	cmd.Stderr = &stdoutStderr
-	err = cmd.Run()
-	if err != nil {
-		if ctx.Err() != nil {
-			logMessage(LogWarn, "[%s] Nmap context error: %v\n", config.Targets, ctx.Err())
-			return []ScanResult{}
-		}
-		logMessage(LogWarn, "[%s] Nmap run err: %s\nNmap output:\n%s\n", config.Targets, err, stdoutStderr.String())
-		return []ScanResult{}
-	}
-	logMessage(LogDebug, "[%s] Nmap completed. Parsing XML output from %s\n", config.Targets, tmpFile.Name())
-	parsedResults, parseErr := parseNmapXML(tmpFile.Name())
-	if parseErr != nil {
-		logMessage(LogWarn, "[%s] Nmap XML parse err: %s\n", config.Targets, parseErr)
-		return []ScanResult{}
-	}
-	return parsedResults
 }
 
-func parseNmapXML(xmlFilePath string) ([]ScanResult, error) {
-	xmlFile, err := os.Open(xmlFilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open nmap xml output file '%s': %w", xmlFilePath, err)
+// grabBanner attempts to read service banners
+func grabBanner(conn net.Conn, portInfo PortInfo) string {
+	conn.SetReadDeadline(time.Now().Add(time.Duration(config.Timeout) * time.Millisecond))
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil && err != io.EOF {
+		return ""
 	}
-	defer xmlFile.Close()
-	byteValue, _ := io.ReadAll(xmlFile)
-	if len(byteValue) == 0 {
-		return nil, fmt.Errorf("nmap xml output file '%s' is empty", xmlFilePath)
+	banner := strings.TrimSpace(string(buffer[:n]))
+	if portInfo.Service == "http" {
+		conn.Write([]byte("HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+		n, err = conn.Read(buffer)
+		if err != nil && err != io.EOF {
+			return ""
+		}
+		banner = strings.TrimSpace(string(buffer[:n]))
 	}
-	var nmapRun NmapRun
-	if err := xml.Unmarshal(byteValue, &nmapRun); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal nmap xml from '%s': %w", xmlFilePath, err)
-	}
-	var results []ScanResult
-	for _, host := range nmapRun.Hosts {
-		if host.Status.State != "up" {
-			logMessage(LogDebug, "Skipping host %s, state: %s\n", host.Address.Addr, host.Status.State)
-			continue
-		}
-		var sr ScanResult
-		sr.IP = host.Address.Addr
-		if len(host.Hostnames) > 0 && host.Hostnames[0].Name != "" {
-			sr.Hostname = host.Hostnames[0].Name
-		} else {
-			addrs, lookupErr := net.LookupAddr(sr.IP)
-			if lookupErr == nil && len(addrs) > 0 {
-				sr.Hostname = strings.TrimSuffix(addrs[0], ".")
-			}
-		}
-		if len(host.OS.OsMatches) > 0 {
-			bestOS := ""
-			highestAccuracy := -1
-			for _, osMatch := range host.OS.OsMatches {
-				acc, _ := strconv.Atoi(osMatch.Accuracy)
-				if acc > highestAccuracy {
-					highestAccuracy = acc
-					bestOS = osMatch.Name
-					if len(osMatch.OSClasses) > 0 && osMatch.OSClasses[0].OSFamily != "" {
-						bestOS += fmt.Sprintf(" (Family: %s, Gen: %s)", osMatch.OSClasses[0].OSFamily, osMatch.OSClasses[0].OSGen)
-					}
-				}
-			}
-			sr.OS = bestOS
-		}
-		for _, port := range host.Ports.Ports {
-			portID, _ := strconv.Atoi(port.PortID)
-			pi := PortInfo{Port: portID, Protocol: port.Protocol, State: port.State.State, Service: port.Service.Name, Version: port.Service.Version}
-			if port.Service.Product != "" {
-				pi.Service = port.Service.Product
-				if port.Service.Version != "" {
-					pi.Version = port.Service.Version
-				}
-				if port.Service.Product != "" && port.Service.Version != "" {
-					pi.Version = port.Service.Product + " " + port.Service.Version
-				} else if port.Service.Product != "" {
-					pi.Version = port.Service.Product
-				} else {
-					pi.Version = port.Service.Version
-				}
-			}
-			if port.Service.ExtraInfo != "" {
-				pi.Version += " (" + strings.TrimSpace(port.Service.ExtraInfo) + ")"
-			}
-			sr.Ports = append(sr.Ports, pi)
-			for _, script := range port.Scripts {
-				sr.NmapScriptResults += fmt.Sprintf("Port %d/%s - Script: %s:\n%s\n", portID, port.Protocol, script.ID, strings.TrimSpace(script.Output))
-			}
-		}
-		results = append(results, sr)
-	}
-	return results, nil
+	return banner
 }
 
-func grabBannersNative(ip string, ports []PortInfo, timeoutMs int, threads int) map[int]string {
-	banners := make(map[int]string)
-	var wg sync.WaitGroup
-	var mutex sync.Mutex
-	timeout := time.Duration(timeoutMs) * time.Millisecond
-	sem := make(chan struct{}, threads)
-
-	for _, portInfo := range ports {
-		if portInfo.Protocol == "tcp" && portInfo.State == "open" {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(p PortInfo) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, p.Port), timeout)
-				if err != nil {
-					logMessage(LogWarn, "[%s:%d] Banner grab failed: %v\n", ip, p.Port, err)
-					return
-				}
-				defer conn.Close()
-				var probe []byte
-				if p.Port == 80 || strings.Contains(strings.ToLower(p.Service), "http") {
-					probe = []byte("HEAD / HTTP/1.1\r\nHost: " + ip + "\r\nUser-Agent: " + AppName + "/" + AppVersion + "\r\nConnection: close\r\n\r\n")
-				} else if p.Port == 21 || strings.Contains(strings.ToLower(p.Service), "ftp") {
-					// Usually on connect
-				} else if p.Port == 22 || strings.Contains(strings.ToLower(p.Service), "ssh") {
-					// Usually on connect
-				} else {
-					probe = []byte("\r\n\r\n")
-				}
-				if len(probe) > 0 {
-					_, err = conn.Write(probe)
-					if err != nil {
-						logMessage(LogWarn, "[%s:%d] Banner probe write failed: %v\n", ip, p.Port, err)
-						return
-					}
-				}
-				err = conn.SetReadDeadline(time.Now().Add(timeout))
-				if err != nil {
-					logMessage(LogWarn, "[%s:%d] Set read deadline failed: %v\n", ip, p.Port, err)
-					return
-				}
-				buffer := make([]byte, 2048)
-				n, readErr := conn.Read(buffer)
-				if readErr != nil && readErr != io.EOF {
-					logMessage(LogWarn, "[%s:%d] Banner read failed: %v\n", ip, p.Port, readErr)
-					return
-				}
-				if n > 0 {
-					banner := strings.TrimSpace(string(buffer[:n]))
-					banner = regexp.MustCompile(`[^\x20-\x7E\r\n\t]`).ReplaceAllString(banner, "")
-					mutex.Lock()
-					banners[p.Port] = banner
-					mutex.Unlock()
-				}
-			}(portInfo)
-		}
-	}
-	wg.Wait()
-	close(sem)
-	return banners
-}
-
-func loadCustomVulnerabilities(filePath string) {
-	if filePath == "" {
-		return
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		logMessage(LogWarn, "Warning: Could not read custom vuln DB '%s': %s\n", filePath, err)
-		return
-	}
-	var loadedDB map[string]map[string]VulnerabilityInsight
-	if err := json.Unmarshal(data, &loadedDB); err != nil {
-		logMessage(LogWarn, "Warning: Could not parse custom vuln DB '%s': %s\n", filePath, err)
-		return
-	}
-	// Basic validation
-	for service, versions := range loadedDB {
-		for version, vuln := range versions {
-			if vuln.Insight == "" || vuln.Severity == "" {
-				logMessage(LogWarn, "Invalid vuln entry for %s/%s: missing insight or severity\n", service, version)
-				continue
-			}
-			if customVulnDB[service] == nil {
-				customVulnDB[service] = make(map[string]VulnerabilityInsight)
-			}
-			customVulnDB[service][version] = vuln
-		}
-	}
-	logMessage(LogInfo, "Successfully loaded %d service entries from custom vulnerability DB: %s\n", len(customVulnDB), filePath)
-}
-
-func checkVulnerabilityInsights(ports []PortInfo) []VulnerabilityInsight {
-	var insights []VulnerabilityInsight
-	mergedDB := make(map[string]map[string]VulnerabilityInsight)
-	for service, versions := range internalVulnDB {
-		mergedDB[service] = make(map[string]VulnerabilityInsight)
-		for ver, insight := range versions {
-			mergedDB[service][ver] = insight
-		}
-	}
-	for service, versions := range customVulnDB {
-		if _, ok := mergedDB[service]; !ok {
-			mergedDB[service] = make(map[string]VulnerabilityInsight)
-		}
-		for ver, insight := range versions {
-			insight.Source = "custom"
-			mergedDB[service][ver] = insight
-		}
-	}
-
-	for _, p := range ports {
-		if p.State != "open" {
-			continue
-		}
-		serviceKey := strings.ToLower(p.Service)
-		if serviceKey == "microsoft-ds" || serviceKey == "netbios-ssn" {
-			serviceKey = "smb"
-		}
-		if strings.Contains(serviceKey, "www") || strings.Contains(serviceKey, "http-proxy") {
-			serviceKey = "http"
-		}
-		versionKey := strings.TrimSpace(p.Version)
-		plainServiceKey := strings.ToLower(p.Service)
-
-		if serviceVulns, ok := mergedDB[serviceKey]; ok {
-			foundMatch := false
-			if insight, vok := serviceVulns[versionKey]; vok {
-				iCopy := insight
-				iCopy.Port = p.Port
-				iCopy.ServiceName = p.Service
-				iCopy.Version = p.Version
-				insights = append(insights, iCopy)
-				foundMatch = true
-			}
-			if !foundMatch {
-				if insight, wildOk := serviceVulns["*"]; wildOk {
-					iCopy := insight
-					iCopy.Port = p.Port
-					iCopy.ServiceName = p.Service
-					iCopy.Version = p.Version
-					insights = append(insights, iCopy)
-				}
-			}
-		}
-		if serviceKey != plainServiceKey {
-			if serviceVulnsPlain, okPlain := mergedDB[plainServiceKey]; okPlain {
-				foundMatchPlain := false
-				if insight, vokPlain := serviceVulnsPlain[versionKey]; vokPlain {
-					isDup := false
-					for _, ex := range insights {
-						if ex.Port == p.Port && ex.Insight == insight.Insight {
-							isDup = true
-							break
-						}
-					}
-					if !isDup {
-						iCopy := insight
-						iCopy.Port = p.Port
-						iCopy.ServiceName = p.Service
-						iCopy.Version = p.Version
-						insights = append(insights, iCopy)
-						foundMatchPlain = true
-					}
-				}
-				if !foundMatchPlain {
-					if insight, wildOkPlain := serviceVulnsPlain["*"]; wildOkPlain {
-						isDup := false
-						for _, ex := range insights {
-							if ex.Port == p.Port && ex.Insight == insight.Insight {
-								isDup = true
-								break
-							}
-						}
-						if !isDup {
-							iCopy := insight
-							iCopy.Port = p.Port
-							iCopy.ServiceName = p.Service
-							iCopy.Version = p.Version
-							insights = append(insights, iCopy)
-						}
-					}
-				}
-			}
-		}
-	}
-	return insights
-}
-
-func runWebDiscoveryForHost(ctx context.Context, hostResult ScanResult, config Config) []WebDiscoveryResult {
-	var discoveryResults []WebDiscoveryResult
-	var wordlist []string
-	if config.WebWordlistFile != "" {
-		fileData, err := os.ReadFile(config.WebWordlistFile)
-		if err != nil {
-			logMessage(LogWarn, "[%s] Warn: Web wordlist '%s' read error: %s. Using internal.\n", hostResult.IP, config.WebWordlistFile, err)
-			wordlist = defaultWebWordlist
-		} else {
-			var cleanList []string
-			for _, item := range strings.Split(string(fileData), "\n") {
-				item = strings.TrimSpace(item)
-				if item != "" && !strings.HasPrefix(item, "#") {
-					cleanList = append(cleanList, item)
-				}
-			}
-			wordlist = cleanList
-		}
-	} else {
-		wordlist = defaultWebWordlist
-	}
-	if len(wordlist) == 0 {
-		return discoveryResults
-	}
-
-	httpClient := &http.Client{
-		Timeout: time.Duration(config.Timeout) * time.Millisecond,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	var wg sync.WaitGroup
-	var mutex sync.Mutex
-	webSem := make(chan struct{}, config.Threads)
-
-	for _, portInfo := range hostResult.Ports {
-		if portInfo.State == "open" && (strings.Contains(portInfo.Service, "http") || portInfo.Port == 80 || portInfo.Port == 443 || portInfo.Port == 8080 || portInfo.Port == 8443) {
-			scheme := "http"
-			if strings.Contains(portInfo.Service, "https") || portInfo.Port == 443 || portInfo.Port == 8443 {
-				scheme = "https"
-			}
-			baseURL := fmt.Sprintf("%s://%s:%d", scheme, hostResult.IP, portInfo.Port)
-			logMessage(LogDebug, "[%s] Starting web discovery for base: %s\n", hostResult.IP, baseURL)
-
-			for _, path := range wordlist {
-				select {
-				case <-ctx.Done():
-					logMessage(LogDebug, "[%s] Web discovery ctx done for %s\n", hostResult.IP, baseURL+path)
-					return discoveryResults
-				default:
-				}
-				wg.Add(1)
-				webSem <- struct{}{}
-				go func(targetPath string) {
-					defer wg.Done()
-					defer func() { <-webSem }()
-					var res WebDiscoveryResult
-					targetURL := baseURL + targetPath
-					res.URL = targetURL
-					logMessage(LogDebug, "[%s] Web probing: %s\n", hostResult.IP, targetURL)
-					req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-					if err != nil {
-						logMessage(LogWarn, "[%s] Web request creation failed for %s: %v\n", hostResult.IP, targetURL, err)
-						return
-					}
-					req.Header.Set("User-Agent", AppName+"/"+AppVersion)
-					resp, err := httpClient.Do(req)
-					if err != nil {
-						if ctx.Err() != nil {
-							logMessage(LogDebug, "[%s] Web request ctx done for %s\n", hostResult.IP, targetURL)
-						} else {
-							logMessage(LogWarn, "[%s] Web req err %s: %v\n", hostResult.IP, targetURL, err)
-						}
-						return
-					}
-					defer resp.Body.Close()
-					res.StatusCode = resp.StatusCode
-					res.Length = resp.ContentLength
-					if res.StatusCode >= 200 && res.StatusCode < 300 {
-						res.Found = true
-						bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
-						titleRegex := regexp.MustCompile(`(?ims)<title[^>]*>(.*?)</title>`)
-						matches := titleRegex.FindStringSubmatch(string(bodyBytes))
-						if len(matches) > 1 {
-							res.Title = strings.TrimSpace(matches[1])
-						}
-					} else if res.StatusCode >= 300 && res.StatusCode < 400 {
-						res.Found = true
-						res.Title = "Redirect: " + resp.Header.Get("Location")
-					} else if res.StatusCode == 401 || res.StatusCode == 403 {
-						res.Found = true
-						res.Title = http.StatusText(res.StatusCode)
-					}
-					if res.Found {
-						mutex.Lock()
-						discoveryResults = append(discoveryResults, res)
-						mutex.Unlock()
-					}
-				}(path)
-			}
-		}
-	}
-	wg.Wait()
-	close(webSem)
-	return discoveryResults
-}
-
-func runLiveSniffer(ifaceName string, durationSec int, bpfFilter string, pcapFile string) {
-	logMessage(LogInfo, "\n--- Starting Live Packet Sniffing on %s ---\n", ifaceName)
-	if durationSec > 0 {
-		logMessage(LogInfo, "Duration: %d seconds\n", durationSec)
-	} else {
-		logMessage(LogInfo, "Duration: Indefinite (Ctrl+C to stop)\n")
-	}
-	if bpfFilter != "" {
-		logMessage(LogInfo, "BPF Filter: %s\n", bpfFilter)
-	} else {
-		logMessage(LogInfo, "BPF Filter: None\n")
-	}
-	if pcapFile != "" {
-		logMessage(LogInfo, "Saving to PCAP: %s\n", pcapFile)
-	} else {
-		logMessage(LogInfo, "Saving to PCAP: No\n")
-	}
-
-	summary := SnifferRunSummary{
-		Interface:   ifaceName,
-		Filter:      bpfFilter,
-		PcapFile:    pcapFile,
+// runPacketSniffer captures network packets
+func runPacketSniffer() SniffSummary {
+	log.Printf("Starting packet sniffer on %s...", config.SniffIface)
+	summary := SniffSummary{
+		Interface:   config.SniffIface,
+		Filter:      config.SniffFilter,
+		PcapFile:    config.SniffPcap,
 		TCPSummary:  make(map[string]int),
 		UDPSummary:  make(map[string]int),
 		DNSSummary:  []string{},
 		HTTPSummary: []string{},
-		FTPSummary:  []string{},
-		TelnetSummary: []string{},
 		StartTime:   time.Now(),
 	}
 
-	handle, err := pcap.OpenLive(ifaceName, 1600, true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(config.SniffIface, 1600, true, pcap.BlockForever)
 	if err != nil {
-		logMessage(LogWarn, "Error opening interface %s: %v. Try with sudo/admin.\n", ifaceName, err)
-		summary.Errors = append(summary.Errors, err.Error())
-		displaySnifferSummary(summary)
-		return
+		summary.Errors = append(summary.Errors, fmt.Sprintf("Open interface: %v", err))
+		return summary
 	}
 	defer handle.Close()
 
-	if bpfFilter != "" {
-		if err := handle.SetBPFFilter(bpfFilter); err != nil {
-			logMessage(LogWarn, "Error setting BPF filter '%s': %v\n", bpfFilter, err)
-			summary.Errors = append(summary.Errors, "BPF Err: "+err.Error())
+	if config.SniffFilter != "" {
+		if err := handle.SetBPFFilter(config.SniffFilter); err != nil {
+			summary.Errors = append(summary.Errors, fmt.Sprintf("Set BPF filter: %v", err))
 		}
 	}
 
 	var pcapWriter *pcapgo.Writer
-	var outFile *os.File
-	if pcapFile != "" {
-		if _, err := os.Stat(filepath.Dir(pcapFile)); os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(pcapFile), 0750); err != nil {
-				logMessage(LogWarn, "Error creating directory for PCAP %s: %v\n", pcapFile, err)
-				summary.Errors = append(summary.Errors, "PCAP Dir Err: "+err.Error())
-			}
-		}
-		outFile, err = os.Create(pcapFile)
+	var pcapFile *os.File
+	if config.SniffPcap != "" {
+		var err error
+		pcapFile, err = os.Create(config.SniffPcap)
 		if err != nil {
-			logMessage(LogWarn, "Error creating PCAP file %s: %v\n", pcapFile, err)
-			summary.Errors = append(summary.Errors, "PCAP Create Err: "+err.Error())
+			summary.Errors = append(summary.Errors, fmt.Sprintf("Create PCAP: %v", err))
 		} else {
-			defer outFile.Close()
-			pcapWriter = pcapgo.NewWriter(outFile)
+			defer pcapFile.Close()
+			pcapWriter = pcapgo.NewWriter(pcapFile)
 			if err := pcapWriter.WriteFileHeader(1600, layers.LinkTypeEthernet); err != nil {
-				logMessage(LogWarn, "Error writing PCAP header %s: %v\n", pcapFile, err)
-				summary.Errors = append(summary.Errors, "PCAP Header Err: "+err.Error())
+				summary.Errors = append(summary.Errors, fmt.Sprintf("Write PCAP header: %v", err))
 				pcapWriter = nil
 			}
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.SniffTimeout)*time.Second)
+	defer cancel()
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	packets := packetSource.Packets()
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	ctx, cancelSniffing := context.WithCancel(context.Background())
-	if durationSec > 0 {
-		go func() {
-			time.Sleep(time.Duration(durationSec) * time.Second)
-			cancelSniffing()
-		}()
-	}
-	defer cancelSniffing()
 
-	logMessage(LogInfo, "Listening for packets... (Press Ctrl+C to stop)\n")
-
-loop:
-	for {
+	for packet := range packetSource.Packets() {
 		select {
-		case packet, ok := <-packets:
-			if !ok || packet == nil {
-				logMessage(LogInfo, "Packet source closed.\n")
-				break loop
-			}
-			summary.PacketsSeen++
-			if pcapWriter != nil {
-				if err := pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packet.Data()); err != nil {
-					logMessage(LogWarn, "PCAP write error: %v\n", err)
-					summary.Errors = append(summary.Errors, "PCAP Write Err: "+err.Error())
-					pcapWriter = nil
-					if outFile != nil {
-						outFile.Close()
-						outFile = nil
-					}
-				}
-			}
-
-			// Process packet layers
-			if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-				ip, _ := ipLayer.(*layers.IPv4)
-				srcIP := ip.SrcIP.String()
-				dstIP := ip.DstIP.String()
-
-				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-					tcp, _ := tcpLayer.(*layers.TCP)
-					key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, tcp.SrcPort, dstIP, tcp.DstPort)
-					summary.TCPSummary[key]++
-					if tcp.SrcPort == 80 || tcp.DstPort == 80 || tcp.SrcPort == 443 || tcp.DstPort == 443 {
-						summary.HTTPSummary = append(summary.HTTPSummary, key)
-					} else if tcp.SrcPort == 21 || tcp.DstPort == 21 {
-						summary.FTPSummary = append(summary.FTPSummary, key)
-					} else if tcp.SrcPort == 23 || tcp.DstPort == 23 {
-						summary.TelnetSummary = append(summary.TelnetSummary, key)
-					}
-				} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
-					udp, _ := udpLayer.(*layers.UDP)
-					key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, udp.SrcPort, dstIP, udp.DstPort)
-					summary.UDPSummary[key]++
-					if udp.SrcPort == 53 || udp.DstPort == 53 {
-						if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
-							dns, _ := dnsLayer.(*layers.DNS)
-							for _, q := range dns.Questions {
-								summary.DNSSummary = append(summary.DNSSummary, fmt.Sprintf("%s (%s)", q.Name, q.Type))
-							}
-						}
-					}
-				}
-			}
-		case <-sigChan:
-			logMessage(LogInfo, "Received interrupt signal, stopping sniffer...\n")
-			break loop
 		case <-ctx.Done():
-			logMessage(LogInfo, "Sniffing duration reached, stopping...\n")
-			break loop
+			break
+		default:
 		}
+		summary.Packets++
+		if pcapWriter != nil {
+			if err := pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packet.Data()); err != nil {
+				summary.Errors = append(summary.Errors, fmt.Sprintf("Write PCAP: %v", err))
+				pcapWriter = nil
+				if pcapFile != nil {
+					pcapFile.Close()
+					pcapFile = nil
+				}
+			}
+		}
+		processPacket(packet, &summary)
 	}
-
 	summary.EndTime = time.Now()
-	displaySnifferSummary(summary)
+	log.Println("Packet sniffing completed")
+	return summary
 }
 
-func displaySnifferSummary(summary SnifferRunSummary) {
-	fmt.Println("\n=== Sniffer Summary ===")
-	fmt.Printf("Interface: %s\n", summary.Interface)
-	fmt.Printf("Filter: %s\n", summary.Filter)
-	fmt.Printf("Packets Captured: %d\n", summary.PacketsSeen)
-	fmt.Printf("Duration: %v\n", summary.EndTime.Sub(summary.StartTime))
-	if summary.PcapFile != "" {
-		fmt.Printf("Saved PCAP: %s\n", summary.PcapFile)
+// processPacket analyzes captured packets
+func processPacket(packet gopacket.Packet, summary *SniffSummary) {
+	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+		ip, _ := ipLayer.(*layers.IPv4)
+		srcIP := ip.SrcIP.String()
+		dstIP := ip.DstIP.String()
+
+		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+			tcp, _ := tcpLayer.(*layers.TCP)
+			key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, tcp.SrcPort, dstIP, tcp.DstPort)
+			summary.TCPSummary[key]++
+			if tcp.SrcPort == 80 || tcp.DstPort == 80 || tcp.SrcPort == 443 || tcp.DstPort == 443 {
+				summary.HTTPSummary = append(summary.HTTPSummary, key)
+			}
+		} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+			udp, _ := udpLayer.(*layers.UDP)
+			key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, udp.SrcPort, dstIP, udp.DstPort)
+			summary.UDPSummary[key]++
+			if udp.SrcPort == 53 || udp.DstPort == 53 {
+				if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+					dns, _ := dnsLayer.(*layers.DNS)
+					for _, q := range dns.Questions {
+						summary.DNSSummary = append(summary.DNSSummary, fmt.Sprintf("%s (%s)", q.Name, q.Type))
+					}
+				}
+			}
+		}
 	}
-	if len(summary.TCPSummary) > 0 {
+}
+
+// saveReport saves scan or sniff results to file
+func saveReport(data interface{}) {
+	if config.OutputFile == "" {
+		return
+	}
+	var output []byte
+	var err error
+	if config.OutputFormat == "json" {
+		output, err = json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			log.Printf("Error marshaling JSON: %v", err)
+			return
+		}
+	} else {
+		output = formatTextReport(data)
+	}
+	if err := os.WriteFile(config.OutputFile+"."+config.OutputFormat, output, 0644); err != nil {
+		log.Printf("Error writing report: %v", err)
+	}
+}
+
+// formatTextReport generates a text report
+func formatTextReport(data interface{}) []byte {
+	var sb strings.Builder
+	switch d := data.(type) {
+	case []ScanResult:
+		sb.WriteString("=== Port Scan Report ===\n")
+		for _, r := range d {
+			sb.WriteString(fmt.Sprintf("IP: %s\n", r.IP))
+			for _, p := range r.Ports {
+				sb.WriteString(fmt.Sprintf("  Port: %d/%s (%s)\n", p.Port, p.Protocol, p.Service))
+				if banner, ok := r.Banners[p.Port]; ok {
+					sb.WriteString(fmt.Sprintf("    Banner: %s\n", banner))
+				}
+			}
+		}
+	case SniffSummary:
+		sb.WriteString("=== Packet Sniff Report ===\n")
+		sb.WriteString(fmt.Sprintf("Interface: %s\n", d.Interface))
+		sb.WriteString(fmt.Sprintf("Filter: %s\n", d.Filter))
+		sb.WriteString(fmt.Sprintf("Packets: %d\n", d.Packets))
+		sb.WriteString(fmt.Sprintf("Duration: %v\n", d.EndTime.Sub(d.StartTime)))
+		if len(d.TCPSummary) > 0 {
+			sb.WriteString("TCP Connections:\n")
+			for k, v := range d.TCPSummary {
+				sb.WriteString(fmt.Sprintf("  %s: %d packets\n", k, v))
+			}
+		}
+		if len(d.HTTPSummary) > 0 {
+			sb.WriteString("HTTP Connections:\n")
+			for _, k := range d.HTTPSummary {
+				sb.WriteString(fmt.Sprintf("  %s\n", k))
+			}
+		}
+		if len(d.DNSSummary) > 0 {
+			sb.WriteString("DNS Queries:\n")
+			for _, q := range d.DNSSummary {
+				sb.WriteString(fmt.Sprintf("  %s\n", q))
+			}
+		}
+		if len(d.Errors) > 0 {
+			sb.WriteString("Errors:\n")
+			for _, e := range d.Errors {
+				sb.WriteString(fmt.Sprintf("  %s\n", e))
+			}
+		}
+	}
+	return []byte(sb.String())
+}
