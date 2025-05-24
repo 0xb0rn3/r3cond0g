@@ -72,7 +72,7 @@
 # Ensure you have the main.go file in your current directory
 
 # Get gopacket dependency
-go get github.com/google/gopacket
+go get github.com/google/gopacket@latest
 
 # Build the project
 go build -o r3cond0g main.go
