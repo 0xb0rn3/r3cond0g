@@ -1,8 +1,3 @@
-// r3cond0g: Advanced Network Reconnaissance & Sniffing Tool
-// Version: 0.0.3 BETA
-// Authors: 0xb0rn3 | 0xbv1
-// For educational and ethical use in controlled environments only
-
 package main
 
 import (
@@ -1450,8 +1445,13 @@ func runLiveSniffer(ifaceName string, durationSec int, bpfFilter string, pcapFil
 		PcapFile:    pcapFile,
 		TCPSummary:  make(map[string]int),
 		UDPSummary:  make(map[string]int),
+		DNSSummary:  []string{},
+		HTTPSummary: []string{},
+		FTPSummary:  []string{},
+		TelnetSummary: []string{},
 		StartTime:   time.Now(),
 	}
+
 	handle, err := pcap.OpenLive(ifaceName, 1600, true, pcap.BlockForever)
 	if err != nil {
 		logMessage(LogWarn, "Error opening interface %s: %v. Try with sudo/admin.\n", ifaceName, err)
@@ -1460,6 +1460,7 @@ func runLiveSniffer(ifaceName string, durationSec int, bpfFilter string, pcapFil
 		return
 	}
 	defer handle.Close()
+
 	if bpfFilter != "" {
 		if err := handle.SetBPFFilter(bpfFilter); err != nil {
 			logMessage(LogWarn, "Error setting BPF filter '%s': %v\n", bpfFilter, err)
@@ -1481,11 +1482,11 @@ func runLiveSniffer(ifaceName string, durationSec int, bpfFilter string, pcapFil
 			logMessage(LogWarn, "Error creating PCAP file %s: %v\n", pcapFile, err)
 			summary.Errors = append(summary.Errors, "PCAP Create Err: "+err.Error())
 		} else {
+			defer outFile.Close()
 			pcapWriter = pcapgo.NewWriter(outFile)
 			if err := pcapWriter.WriteFileHeader(1600, layers.LinkTypeEthernet); err != nil {
 				logMessage(LogWarn, "Error writing PCAP header %s: %v\n", pcapFile, err)
 				summary.Errors = append(summary.Errors, "PCAP Header Err: "+err.Error())
-				outFile.Close()
 				pcapWriter = nil
 			}
 		}
@@ -1497,10 +1498,15 @@ func runLiveSniffer(ifaceName string, durationSec int, bpfFilter string, pcapFil
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	ctx, cancelSniffing := context.WithCancel(context.Background())
 	if durationSec > 0 {
-		ctx, _ = context.WithTimeout(ctx, time.Duration(durationSec)*time.Second)
+		go func() {
+			time.Sleep(time.Duration(durationSec) * time.Second)
+			cancelSniffing()
+		}()
 	}
 	defer cancelSniffing()
+
 	logMessage(LogInfo, "Listening for packets... (Press Ctrl+C to stop)\n")
+
 loop:
 	for {
 		select {
@@ -1515,4 +1521,64 @@ loop:
 					logMessage(LogWarn, "PCAP write error: %v\n", err)
 					summary.Errors = append(summary.Errors, "PCAP Write Err: "+err.Error())
 					pcapWriter = nil
-					if outFile !=
+					if outFile != nil {
+						outFile.Close()
+						outFile = nil
+					}
+				}
+			}
+
+			// Process packet layers
+			if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+				ip, _ := ipLayer.(*layers.IPv4)
+				srcIP := ip.SrcIP.String()
+				dstIP := ip.DstIP.String()
+
+				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+					tcp, _ := tcpLayer.(*layers.TCP)
+					key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, tcp.SrcPort, dstIP, tcp.DstPort)
+					summary.TCPSummary[key]++
+					if tcp.SrcPort == 80 || tcp.DstPort == 80 || tcp.SrcPort == 443 || tcp.DstPort == 443 {
+						summary.HTTPSummary = append(summary.HTTPSummary, key)
+					} else if tcp.SrcPort == 21 || tcp.DstPort == 21 {
+						summary.FTPSummary = append(summary.FTPSummary, key)
+					} else if tcp.SrcPort == 23 || tcp.DstPort == 23 {
+						summary.TelnetSummary = append(summary.TelnetSummary, key)
+					}
+				} else if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+					udp, _ := udpLayer.(*layers.UDP)
+					key := fmt.Sprintf("%s:%d -> %s:%d", srcIP, udp.SrcPort, dstIP, udp.DstPort)
+					summary.UDPSummary[key]++
+					if udp.SrcPort == 53 || udp.DstPort == 53 {
+						if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+							dns, _ := dnsLayer.(*layers.DNS)
+							for _, q := range dns.Questions {
+								summary.DNSSummary = append(summary.DNSSummary, fmt.Sprintf("%s (%s)", q.Name, q.Type))
+							}
+						}
+					}
+				}
+			}
+		case <-sigChan:
+			logMessage(LogInfo, "Received interrupt signal, stopping sniffer...\n")
+			break loop
+		case <-ctx.Done():
+			logMessage(LogInfo, "Sniffing duration reached, stopping...\n")
+			break loop
+		}
+	}
+
+	summary.EndTime = time.Now()
+	displaySnifferSummary(summary)
+}
+
+func displaySnifferSummary(summary SnifferRunSummary) {
+	fmt.Println("\n=== Sniffer Summary ===")
+	fmt.Printf("Interface: %s\n", summary.Interface)
+	fmt.Printf("Filter: %s\n", summary.Filter)
+	fmt.Printf("Packets Captured: %d\n", summary.PacketsSeen)
+	fmt.Printf("Duration: %v\n", summary.EndTime.Sub(summary.StartTime))
+	if summary.PcapFile != "" {
+		fmt.Printf("Saved PCAP: %s\n", summary.PcapFile)
+	}
+	if len(summary.TCPSummary) > 0 {
