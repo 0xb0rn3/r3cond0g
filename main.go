@@ -184,6 +184,7 @@ func main() {
 
 func runMenu() {
 	reader := bufio.NewReader(os.Stdin)
+	var input string // Declare input variable outside the loop
 
 	for {
 		fmt.Println("\n=== r3cond0g Menu ===")
@@ -196,7 +197,7 @@ func runMenu() {
 		fmt.Println("7. Toggle Script Scanning (Current: " + boolToString(globalConfig.ScriptScan) + ")")
 		fmt.Println("8. Toggle Banner Grabbing (Current: " + boolToString(globalConfig.BannerGrab) + ")")
 		fmt.Println("9. Toggle Use Rustscan (Current: " + boolToString(globalConfig.UseRustScan) + ")")
-		fmt.Println("10. Set Output File (Current: " + getCurrentSetting(globalConfig.OutputFile, "Not Set") + ")")
+		fmtPrintln("10. Set Output File (Current: " + getCurrentSetting(globalConfig.OutputFile, "Not Set") + ")")
 		fmt.Println("11. Toggle Verbose Output (Current: " + boolToString(globalConfig.Verbose) + ")")
 		fmt.Println("12. Set Number of Threads (Current: " + strconv.Itoa(globalConfig.Threads) + ")")
 		fmt.Println("13. Set Timeout (ms) (Current: " + strconv.Itoa(globalConfig.Timeout) + ")")
@@ -205,7 +206,7 @@ func runMenu() {
 		fmt.Println("16. Exit")
 		fmt.Print("Enter your choice: ")
 
-		input, _ := reader.ReadString('\n')
+		input, _ = reader.ReadString('\n') // Use assignment `=` here
 		input = strings.TrimSpace(input)
 
 		switch input {
@@ -258,7 +259,7 @@ func runMenu() {
 			fmt.Println("   4. NULL")
 			fmt.Println("   5. FIN")
 			fmt.Println("   6. XMAS")
-			fmt.Println("   7. COMPREHENSIVE")
+			fmtPrintln("   7. COMPREHENSIVE")
 			fmt.Print("Enter your choice: ")
 			scanChoice, _ := reader.ReadString('\n')
 			scanChoice = strings.TrimSpace(scanChoice)
@@ -309,7 +310,7 @@ func runMenu() {
 			}
 		case "13":
 			fmt.Print("Enter timeout in milliseconds: ")
-			timeoutStr, _ := reader.ReadString('\n')
+			timeoutStr, _ = reader.ReadString('\n')
 			timeoutStr = strings.TrimSpace(timeoutStr)
 			timeout, err := strconv.Atoi(timeoutStr)
 			if err == nil && timeout > 0 {
