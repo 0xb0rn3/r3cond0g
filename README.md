@@ -73,6 +73,9 @@
 
 # Get gopacket dependency
 go get github.com/google/gopacket@latest
+go mod init r3cond0g
+go mod tidy
+
 
 # Build the project
 go build -o r3cond0g main.go
