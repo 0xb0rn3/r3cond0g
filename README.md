@@ -14,79 +14,118 @@
                                     |___/ 
 ```
 
-**r3cond0g** is an advanced network reconnaissance tool designed for security professionals and ethical hackers. Built with Go, it provides a powerful interface for network scanning, combining the speed of modern scanning techniques with comprehensive analysis capabilities.
+**r3cond0g** is an advanced network reconnaissance and sniffing tool designed for security professionals, pentesters, and ethical hackers. Built with Go, it provides a powerful and versatile interface for network scanning and traffic analysis, combining the speed of modern scanning techniques with comprehensive analysis capabilities suitable for CTFs and red team training.
 
 ## Features
 
-- **Multiple Scan Types**: SYN, Connect, UDP, and Comprehensive scans
-- **Service Detection**: Identify running services on open ports
-- **OS Fingerprinting**: Detect operating systems running on target hosts
-- **Script Scanning**: Run vulnerability assessment scripts
-- **Performance Optimization**: Optional integration with rustscan for faster port discovery
-- **Concurrent Scanning**: Multi-threaded scanning for efficiency
-- **Flexible Target Specification**: Support for CIDR notation, IP ranges, and individual IPs
-- **Interactive Mode**: User-friendly command-line interface
-- **Detailed Output**: Comprehensive scan results with optional file output
-- **Cross-Platform**: Works on both Linux and Windows systems
+* **Multiple Nmap Scan Types**: SYN, Connect, TCP, UDP, NULL, FIN, XMAS, AGGRESSIVE, and Comprehensive scans.
+* **Service & Version Detection**: Identify running services and their versions on open ports using Nmap.
+* **OS Fingerprinting**: Detect operating systems running on target hosts via Nmap.
+* **Nmap Script Scanning**: Run Nmap's default vulnerability and discovery scripts.
+* **Performance Optimization**:
+    * Optional integration with **Rustscan** for significantly faster initial port discovery.
+    * Concurrent scanning using Go routines for efficiency.
+* **Native Banner Grabbing**: Fast, concurrent banner grabbing for open TCP ports.
+* **Vulnerability Insights (BETA)**:
+    * Identifies potential vulnerabilities based on discovered service versions.
+    * Includes an internal, expandable list of common vulnerabilities.
+    * Supports loading custom vulnerability definitions from a user-provided JSON file.
+* **Web Directory & File Discovery (BETA)**:
+    * Performs basic directory and file brute-forcing on identified HTTP/S services.
+    * Uses an internal default wordlist or a custom user-provided wordlist.
+* **Live Packet Sniffing (BETA)**:
+    * Captures live network traffic on a specified interface using `gopacket`.
+    * Supports BPF (Berkeley Packet Filter) syntax for traffic filtering.
+    * Provides a real-time summary of captured traffic and common protocols.
+    * Option to save captured packets to a `.pcap` file.
+* **Flexible Target Specification**: Support for CIDR notation, IP ranges, individual IPs, and loading targets from a file.
+* **Interactive Mode**: User-friendly command-line menu for easy configuration.
+* **Detailed Output & Reporting**:
+    * Comprehensive scan results.
+    * Multiple output formats: Text, JSON, and HTML (BETA).
+    * Optional file output for all formats.
+* **Configuration Management**: Saves and loads scan configurations.
+* **Cross-Platform**: Built with Go, aiming for compatibility across Linux, Windows, and macOS (external tools and sniffing libraries have their own dependencies).
 
 ## Installation
 
 ### Prerequisites
 
-- Go 1.16 or higher
-- Nmap (required)
-- Rustscan (optional, for faster scanning)
+* **Go**: Version 1.18 or higher.
+* **Nmap**: Required for core scanning functionality. Ensure it's in your system's PATH.
+* **Rustscan**: Optional, for `-rustscan` fast port discovery. Ensure it's in your system's PATH.
+* **Packet Capture Libraries (for Sniffing feature)**:
+    * **Linux**: `libpcap-dev` (e.g., `sudo apt-get install libpcap-dev`)
+    * **macOS**: `libpcap` (usually via Xcode command-line tools or `brew install libpcap`)
+    * **Windows**: `Npcap` (from [nmap.org/npcap/](https://nmap.org/npcap/), install with SDK option).
+* **C Compiler (for Sniffing feature via Cgo)**:
+    * **Linux**: `gcc` (e.g., `sudo apt-get install build-essential`)
+    * **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+    * **Windows**: MinGW-w64 or similar.
 
-### From Source
+### From Source (Recommended)
 
 ```bash
-# Clone the repository
-git clone https://github.com/SecVulnHub/r3cond0g.git
+# git clone https://github.com/0xb0rn3/r3cond0g
+# cd r3cond0g
 
-# Navigate to the project directory
-cd r3cond0g
+# Ensure you have the main.go file in your current directory
+
+# Get gopacket dependency
+go get github.com/google/gopacket
 
 # Build the project
-go build -o r3cond0g
+go build -o r3cond0g main.go
 
 # Make it executable (Linux/macOS)
 chmod +x r3cond0g
-```
 
-### Using Go Install
+# Run
+./r3cond0g
 
-```bash
-go install github.com/SecVulnHub/r3cond0g@latest
-```
+Using go install (If the tool is published to a Go module path)
 
-### Windows PowerShell Quick Deployment
+If the authors publish it, for example, at github.com/0xb0rn3/r3cond0g (this is a placeholder URL):
+Bash
 
-```powershell
-# Download and execute directly (for trusted environments only)
-iex (irm https://raw.githubusercontent.com/SecVulnHub/r3cond0g/main/install.ps1)
-```
+go install github.com/0xb0rn3/r3cond0g@latest
 
-## Usage
+(This command will only work if the authors set up a proper Go module and repository.)
+Usage
+Command Line Arguments
 
-### Command Line Arguments
+Run ./r3cond0g -h to see all available options. Some key flags include:
 
-```
 ./r3cond0g [options]
 
 Options:
-  -targets string    Target specification (CIDR, IP range, or comma-separated IPs)
-  -ports string      Port specification (e.g., 80,443,8080 or 1-1000) (default "1-1000")
-  -scan string       Scan type (SYN, CONNECT, UDP, COMPREHENSIVE) (default "SYN")
-  -threads int       Number of concurrent threads (default 100)
-  -timeout int       Timeout in milliseconds (default 2000)
-  -output string     Output file name
-  -verbose           Enable verbose output
-  -fast              Enable fast mode (uses rustscan if available)
-  -service           Enable service detection
-  -os                Enable OS detection
-  -script            Enable script scanning
-  -custom string     Custom nmap arguments
-  -rustscan          Use rustscan for port discovery
+  -targets string        Target specification (CIDR, IP range, or comma-separated IPs)
+  -file string           Path to a file containing a list of targets
+  -ports string          Port specification (e.g., 80,443 or 1-1000)
+  -common-ports          Scan common ports (overrides -ports)
+  -all-ports             Scan all 65535 ports (overrides -ports and -common-ports)
+  -scan string           Nmap scan type (SYN, CONNECT, TCP, UDP, NULL, FIN, XMAS, AGGRESSIVE, COMPREHENSIVE) (default "SYN")
+  -threads int           Number of concurrent Nmap threads/operations (default 10)
+  -timeout int           Timeout in milliseconds for individual probes/operations (default 3000)
+  -output string         Output file name (prefix, format will be appended)
+  -format string         Output format (text, json, html) (default "text")
+  -verbose               Enable verbose output
+  -service               Enable Nmap service detection (-sV) (default true)
+  -os                    Enable Nmap OS detection (-O) (default true)
+  -script                Enable Nmap default script scanning (default false)
+  -custom string         Custom nmap arguments
+  -rustscan              Use rustscan for initial fast port discovery (default true if available)
+  -banners               Attempt to grab banners from open TCP ports (default true)
+  -vuln-insights         Enable basic vulnerability insights (default true)
+  -custom-vuln-db string Path to custom vulnerability DB JSON file
+  -web-discover          Enable basic web directory/file discovery (default false)
+  -web-wordlist string   Path to custom wordlist for web discovery
+  -sniff-iface string    Network interface for sniffing
+  -sniff-duration int    Duration for sniffing in seconds (0 for indefinite) (default 60)
+  -sniff-filter string   BPF filter for sniffing
+  -sniff-pcap string     File to save sniffed packets (e.g., capture.pcap)
+  -save-config           Save current settings to config file on exit from menu (default true)
+
 ```
 
 ### Interactive Mode
@@ -151,14 +190,56 @@ PORT    STATE   SERVICE
 
 === End of Results ===
 ```
+Interactive Mode
 
+Simply run r3cond0g without arguments to enter the interactive menu:
 ## Disclaimer
 
 This tool is intended for use by security professionals for legitimate security testing with proper authorization. Unauthorized scanning of networks is illegal and unethical. Always ensure you have explicit permission before scanning any network or system.
 
+Follow the on-screen prompts to configure your scan parameters, sniffing options, analysis features, and output settings.
+Examples
+
+    Aggressive Nmap scan on a network, with vulnerability insights and web discovery, saving to JSON:
+    ./r3cond0g -targets 192.168.1.0/24 -scan AGGRESSIVE -vuln-insights -web-discover -output results_net1 -format json
+    Fast Rustscan discovery on common ports for a single host, followed by detailed Nmap service scan:
+    ./r3cond0g -targets 10.10.10.5 -rustscan -common-ports -service
+    Sniff HTTP traffic on eth0 indefinitely and save to webapp.pcap:
+    sudo ./r3cond0g -sniff-iface eth0 -sniff-duration 0 -sniff-filter "tcp port 80 or tcp port 443" -sniff-pcap webapp.pcap
+Sample Output (Text Format - Illustrative)
+    === Scan Results (1 host processed) ===
+
+====================================
+Host: 192.168.1.10 (example.local)
+OS Guess: Linux 5.4
+Rustscan Initial Ports: 21, 22, 80, 443, 3306
+--- Open Ports & Services ---
+PORT     STATE  SERVICE                  VERSION & BANNER
+-------- ------ ------------------------ --------------------------------------------------
+21/tcp   open   ftp                      vsftpd 3.0.3 | Banner: 220 (vsFTPd 3.0.3)
+22/tcp   open   ssh                      OpenSSH 8.2p1 Ubuntu 4ubuntu0.4 | Banner: SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.4
+80/tcp   open   http                     Apache httpd 2.4.49 ((Ubuntu)) | Banner: HTTP/1.1 200 OK...
+443/tcp  open   ssl/http                 Apache httpd 2.4.49 ((Ubuntu)) | Banner: HTTP/1.1 200 OK...
+3306/tcp open   mysql                    MySQL 8.0.28-0ubuntu0.20.04.3 | Banner: Z.....
+...
+
+--- Web Discovery ---
+  [200] http://192.168.1.10:80/ (Title: Welcome to Apache!, Length: 11321)
+  [301] http://192.168.1.10:80/admin (Title: Redirect: /admin/, Length: 312)
+  [403] http://192.168.1.10:80/.git/HEAD (Title: Forbidden, Length: 279)
+
+--- Potential Vulnerability Insights ---
+  Port 80 (Apache httpd 2.4.49): [Critical] Path Traversal & RCE (CVE-2021-41773, CVE-2021-42013). (Ref: CVE-2021-41773) (Source: internal)
+  Port 22 (OpenSSH 8.2p1 Ubuntu 4ubuntu0.4): [Low] Potential regex DoS in ssh-add (CVE-2021-28041), less impactful for server. (Ref: CVE-2021-28041) (Source: internal)
+...
+====================================
+
+=== End of Scan Results ===
+
+
 ## About
 
-- **Version**: 0.0.1 BETA
+- **Version**: 0.0.2 BETA
 - **Designed by**: [0xb0rn3](https://github.com/0xb0rn3)
 - **Maintained by**: [SecVulnHub](https://github.com/SecVulnHub)
 - **License**: MIT
