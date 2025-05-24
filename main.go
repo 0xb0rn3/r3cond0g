@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -24,13 +25,15 @@ import (
 // Constants
 const (
 	AppName    = "r3cond0g"
-	AppVersion = "1.0.0"
+	AppVersion = "1.0.1"
 	ConfigDir  = ".r3cond0g"
 	ConfigFile = "config.json"
+	AuditLog   = "audit.log"
 )
 
 // Config holds tool configuration
 type Config struct {
+	NmapFile     string   `json:"nmap_file"`
 	Targets      string   `json:"targets"`
 	Ports        string   `json:"ports"`
 	Timeout      int      `json:"timeout"`
@@ -42,9 +45,11 @@ type Config struct {
 	SniffTimeout int      `json:"sniff_timeout"`
 	Threads      int      `json:"threads"`
 	Verbose      bool     `json:"verbose"`
+	AuthToken    string   `json:"auth_token"`
+	AllowedIPs   []string `json:"allowed_ips"`
 }
 
-// ScanResult holds port scanning results
+// ScanResult holds parsed scan results
 type ScanResult struct {
 	IP      string       `json:"ip"`
 	Ports   []PortInfo   `json:"ports"`
@@ -73,16 +78,72 @@ type SniffSummary struct {
 	EndTime     time.Time         `json:"end_time"`
 }
 
+// NmapRun represents Nmap XML structure
+type NmapRun struct {
+	XMLName xml.Name `xml:"nmaprun"`
+	Hosts   []Host   `xml:"host"`
+}
+
+// Host represents a host in Nmap XML
+type Host struct {
+	Address Address   `xml:"address"`
+	Ports   NmapPorts `xml:"ports"`
+}
+
+// Address holds IP address
+type Address struct {
+	Addr string `xml:"addr,attr"`
+}
+
+// NmapPorts holds port information
+type NmapPorts struct {
+	Ports []NmapPort `xml:"port"`
+}
+
+// NmapPort represents a port in Nmap XML
+type NmapPort struct {
+	Protocol string      `xml:"protocol,attr"`
+	PortID   string      `xml:"portid,attr"`
+	State    NmapState   `xml:"state"`
+	Service  NmapService `xml:"service"`
+}
+
+// NmapState holds port state
+type NmapState struct {
+	State string `xml:"state,attr"`
+}
+
+// NmapService holds service information
+type NmapService struct {
+	Name    string `xml:"name,attr"`
+	Product string `xml:"product,attr"`
+	Version string `xml:"version,attr"`
+}
+
 // Global configuration
 var config Config
+var auditLogger *log.Logger
 
-// init sets default configuration
+// init sets default configuration and audit logging
 func init() {
 	config.Timeout = 3000
 	config.OutputFormat = "text"
 	config.Threads = 10
 	config.SniffTimeout = 60
 	config.Verbose = false
+
+	// Initialize audit logger
+	home, err := os.UserHomeDir()
+	if err == nil {
+		auditPath := filepath.Join(home, ConfigDir, AuditLog)
+		f, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+		if err == nil {
+			auditLogger = log.New(f, "AUDIT: ", log.LstdFlags)
+		}
+	}
+	if auditLogger == nil {
+		auditLogger = log.New(os.Stderr, "AUDIT: ", log.LstdFlags)
+	}
 }
 
 // main is the entry point
@@ -90,26 +151,41 @@ func main() {
 	// Parse command-line flags
 	parseFlags()
 
-	// Load configuration from file
+	// Load configuration
 	loadConfig()
 
-	// Validate configuration
-	if config.Targets == "" && config.SniffIface == "" {
-		log.Fatal("Error: Specify targets or sniffing interface")
+	// Validate authorization
+	if !validateAuth() {
+		log.Fatal("Error: Invalid or missing authorization token")
 	}
 
-	// Run scanning or sniffing based on configuration
-	if config.SniffIface != "" {
+	// Validate targets
+	if !validateTargets() {
+		log.Fatal("Error: Targets not in allowed IP range")
+	}
+
+	// Log operation start
+	auditLogger.Printf("Operation started: nmap_file=%s, targets=%s, sniff_iface=%s", config.NmapFile, config.Targets, config.SniffIface)
+
+	// Run analysis or sniffing
+	if config.NmapFile != "" {
+		results := parseNmapResults()
+		saveReport(results)
+	} else if config.SniffIface != "" {
 		summary := runPacketSniffer()
 		saveReport(summary)
 	} else {
-		results := runPortScanner()
-		saveReport(results)
+		log.Fatal("Error: Specify Nmap file or sniffing interface")
 	}
+
+	// Save configuration
+	saveConfig()
+	auditLogger.Println("Operation completed")
 }
 
 // parseFlags handles command-line arguments
 func parseFlags() {
+	flag.StringVar(&config.NmapFile, "nmap-file", "", "Path to Nmap XML file")
 	flag.StringVar(&config.Targets, "targets", "", "Comma-separated IPs or CIDR")
 	flag.StringVar(&config.Ports, "ports", "80,443,22,21", "Comma-separated ports")
 	flag.IntVar(&config.Timeout, "timeout", config.Timeout, "Timeout in ms")
@@ -121,6 +197,7 @@ func parseFlags() {
 	flag.IntVar(&config.SniffTimeout, "sniff-timeout", config.SniffTimeout, "Sniffing duration in seconds")
 	flag.IntVar(&config.Threads, "threads", config.Threads, "Concurrent threads")
 	flag.BoolVar(&config.Verbose, "verbose", config.Verbose, "Enable verbose logging")
+	flag.StringVar(&config.AuthToken, "auth-token", "", "Client authorization token")
 	flag.Parse()
 }
 
@@ -138,6 +215,7 @@ func loadConfig() {
 	if err := json.Unmarshal(data, &config); err != nil {
 		log.Printf("Warning: Failed to parse config: %v", err)
 	}
+	auditLogger.Printf("Loaded config from %s", configPath)
 }
 
 // saveConfig saves configuration to JSON file
@@ -159,123 +237,103 @@ func saveConfig() {
 	if err := os.WriteFile(configPath, data, 0640); err != nil {
 		log.Printf("Warning: Failed to write config: %v", err)
 	}
+	auditLogger.Printf("Saved config to %s", configPath)
 }
 
-// runPortScanner performs TCP port scanning and banner grabbing
-func runPortScanner() []ScanResult {
-	log.Println("Starting port scan...")
-	targets := strings.Split(config.Targets, ",")
-	var results []ScanResult
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	sem := make(chan struct{}, config.Threads)
+// validateAuth checks client authorization token
+func validateAuth() bool {
+	if config.AuthToken == "" {
+		return false
+	}
+	// Mock token validation (replace with real validation in production)
+	if len(config.AuthToken) < 8 {
+		auditLogger.Printf("Invalid token: %s", config.AuthToken)
+		return false
+	}
+	auditLogger.Printf("Validated token: %s", config.AuthToken)
+	return true
+}
 
-	for _, target := range targets {
+// validateTargets ensures targets are in allowed IP ranges
+func validateTargets() bool {
+	if config.Targets == "" || len(config.AllowedIPs) == 0 {
+		return true // No targets or no restrictions
+	}
+	for _, target := range strings.Split(config.Targets, ",") {
 		target = strings.TrimSpace(target)
-		if target == "" {
-			continue
+		ip := net.ParseIP(target)
+		if ip == nil {
+			auditLogger.Printf("Invalid IP: %s", target)
+			return false
 		}
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(t string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			result := scanTarget(t)
-			mu.Lock()
-			results = append(results, result)
-			mu.Unlock()
-		}(target)
-	}
-	wg.Wait()
-	log.Println("Port scan completed")
-	return results
-}
-
-// scanTarget scans a single target for open ports and banners
-func scanTarget(target string) ScanResult {
-	result := ScanResult{
-		IP:      target,
-		Ports:   []PortInfo{},
-		Banners: make(map[int]string),
-	}
-	ports := parsePorts(config.Ports)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, port := range ports {
-		wg.Add(1)
-		go func(p int) {
-			defer wg.Done()
-			addr := fmt.Sprintf("%s:%d", target, p)
-			conn, err := net.DialTimeout("tcp", addr, time.Duration(config.Timeout)*time.Millisecond)
+		allowed := false
+		for _, cidr := range config.AllowedIPs {
+			_, net, err := net.ParseCIDR(cidr)
 			if err != nil {
-				return
+				continue
 			}
-			defer conn.Close()
-			portInfo := PortInfo{Port: p, Protocol: "tcp", Service: guessService(p)}
-			mu.Lock()
+			if net.Contains(ip) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			auditLogger.Printf("Target %s not in allowed range", target)
+			return false
+		}
+	}
+	return true
+}
+
+// parseNmapResults parses Nmap XML output
+func parseNmapResults() []ScanResult {
+	log.Println("Parsing Nmap results...")
+	file, err := os.Open(config.NmapFile)
+	if err != nil {
+		log.Fatalf("Error opening Nmap file: %v", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("Error reading Nmap file: %v", err)
+	}
+
+	var nmapRun NmapRun
+	if err := xml.Unmarshal(data, &nmapRun); err != nil {
+		log.Fatalf("Error parsing Nmap XML: %v", err)
+	}
+
+	var results []ScanResult
+	for _, host := range nmapRun.Hosts {
+		result := ScanResult{
+			IP:      host.Address.Addr,
+			Ports:   []PortInfo{},
+			Banners: make(map[int]string),
+		}
+		for _, port := range host.Ports.Ports {
+			if port.State.State != "open" {
+				continue
+			}
+			portID, _ := strconv.Atoi(port.PortID)
+			portInfo := PortInfo{
+				Port:     portID,
+				Protocol: port.Protocol,
+				Service:  port.Service.Name,
+			}
+			if port.Service.Product != "" {
+				portInfo.Service = port.Service.Product
+				if port.Service.Version != "" {
+					portInfo.Service += " " + port.Service.Version
+				}
+			}
 			result.Ports = append(result.Ports, portInfo)
-			mu.Unlock()
-			banner := grabBanner(conn, portInfo)
-			if banner != "" {
-				mu.Lock()
-				result.Banners[p] = banner
-				mu.Unlock()
-			}
-		}(port)
-	}
-	wg.Wait()
-	return result
-}
-
-// parsePorts converts port string to list of integers
-func parsePorts(ports string) []int {
-	var result []int
-	for _, p := range strings.Split(ports, ",") {
-		p = strings.TrimSpace(p)
-		if port, err := strconv.Atoi(p); err == nil {
-			result = append(result, port)
 		}
+		results = append(results, result)
 	}
-	return result
-}
-
-// guessService maps ports to common services
-func guessService(port int) string {
-	switch port {
-	case 21:
-		return "ftp"
-	case 22:
-		return "ssh"
-	case 23:
-		return "telnet"
-	case 80:
-		return "http"
-	case 443:
-		return "https"
-	default:
-		return "unknown"
-	}
-}
-
-// grabBanner attempts to read service banners
-func grabBanner(conn net.Conn, portInfo PortInfo) string {
-	conn.SetReadDeadline(time.Now().Add(time.Duration(config.Timeout) * time.Millisecond))
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
-	if err != nil && err != io.EOF {
-		return ""
-	}
-	banner := strings.TrimSpace(string(buffer[:n]))
-	if portInfo.Service == "http" {
-		conn.Write([]byte("HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n"))
-		n, err = conn.Read(buffer)
-		if err != nil && err != io.EOF {
-			return ""
-		}
-		banner = strings.TrimSpace(string(buffer[:n]))
-	}
-	return banner
+	log.Println("Nmap parsing completed")
+	auditLogger.Printf("Parsed Nmap file: %s, found %d hosts", config.NmapFile, len(results))
+	return results
 }
 
 // runPacketSniffer captures network packets
@@ -295,6 +353,7 @@ func runPacketSniffer() SniffSummary {
 	handle, err := pcap.OpenLive(config.SniffIface, 1600, true, pcap.BlockForever)
 	if err != nil {
 		summary.Errors = append(summary.Errors, fmt.Sprintf("Open interface: %v", err))
+		auditLogger.Printf("Sniffer error: %v", err)
 		return summary
 	}
 	defer handle.Close()
@@ -302,6 +361,7 @@ func runPacketSniffer() SniffSummary {
 	if config.SniffFilter != "" {
 		if err := handle.SetBPFFilter(config.SniffFilter); err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("Set BPF filter: %v", err))
+			auditLogger.Printf("Sniffer error: %v", err)
 		}
 	}
 
@@ -312,11 +372,13 @@ func runPacketSniffer() SniffSummary {
 		pcapFile, err = os.Create(config.SniffPcap)
 		if err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("Create PCAP: %v", err))
+			auditLogger.Printf("Sniffer error: %v", err)
 		} else {
 			defer pcapFile.Close()
 			pcapWriter = pcapgo.NewWriter(pcapFile)
 			if err := pcapWriter.WriteFileHeader(1600, layers.LinkTypeEthernet); err != nil {
 				summary.Errors = append(summary.Errors, fmt.Sprintf("Write PCAP header: %v", err))
+				auditLogger.Printf("Sniffer error: %v", err)
 				pcapWriter = nil
 			}
 		}
@@ -336,6 +398,7 @@ func runPacketSniffer() SniffSummary {
 		if pcapWriter != nil {
 			if err := pcapWriter.WritePacket(packet.Metadata().CaptureInfo, packet.Data()); err != nil {
 				summary.Errors = append(summary.Errors, fmt.Sprintf("Write PCAP: %v", err))
+				auditLogger.Printf("Sniffer error: %v", err)
 				pcapWriter = nil
 				if pcapFile != nil {
 					pcapFile.Close()
@@ -347,6 +410,7 @@ func runPacketSniffer() SniffSummary {
 	}
 	summary.EndTime = time.Now()
 	log.Println("Packet sniffing completed")
+	auditLogger.Printf("Sniffer completed: %d packets captured", summary.Packets)
 	return summary
 }
 
@@ -391,14 +455,19 @@ func saveReport(data interface{}) {
 		output, err = json.MarshalIndent(data, "", "  ")
 		if err != nil {
 			log.Printf("Error marshaling JSON: %v", err)
+			auditLogger.Printf("Report error: %v", err)
 			return
 		}
 	} else {
 		output = formatTextReport(data)
 	}
-	if err := os.WriteFile(config.OutputFile+"."+config.OutputFormat, output, 0644); err != nil {
+	outputPath := config.OutputFile + "." + config.OutputFormat
+	if err := os.WriteFile(outputPath, output, 0644); err != nil {
 		log.Printf("Error writing report: %v", err)
+		auditLogger.Printf("Report error: %v", err)
+		return
 	}
+	auditLogger.Printf("Saved report to %s", outputPath)
 }
 
 // formatTextReport generates a text report
@@ -406,7 +475,7 @@ func formatTextReport(data interface{}) []byte {
 	var sb strings.Builder
 	switch d := data.(type) {
 	case []ScanResult:
-		sb.WriteString("=== Port Scan Report ===\n")
+		sb.WriteString("=== Nmap Analysis Report ===\n")
 		for _, r := range d {
 			sb.WriteString(fmt.Sprintf("IP: %s\n", r.IP))
 			for _, p := range r.Ports {
@@ -417,7 +486,7 @@ func formatTextReport(data interface{}) []byte {
 			}
 		}
 	case SniffSummary:
-		sb.WriteString("=== Packet Sniff Report ===\n")
+		sb.WriteString("=== Packet Analysis Report ===\n")
 		sb.WriteString(fmt.Sprintf("Interface: %s\n", d.Interface))
 		sb.WriteString(fmt.Sprintf("Filter: %s\n", d.Filter))
 		sb.WriteString(fmt.Sprintf("Packets: %d\n", d.Packets))
