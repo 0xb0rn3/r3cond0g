@@ -1,4 +1,4 @@
-# r3cond0g Network Reconnaissance Tool
+# r3cond0g Network Reconnaissance Tool V0.0.2 (RECON-RAPTOR)
 
 **Authors:** 0xbv1 | 0xn0rn3
 
