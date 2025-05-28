@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -323,18 +322,18 @@ func parseTargets(targets string, targetFile string) []string {
 }
 
 func parseSingleTarget(target string) []string {
-	if strings.Contains(target, "/") {
-		ip, ipnet, err := net.ParseCIDR(target)
-		if err != nil {
-			return []string{target}
-		}
-		var ips []string
-		for ip := ip.Mask(ipStrainet.Mask); ipnet.Contains(ip); inc(ip) {
-			ips = append(ips, ip.String())
-		}
-		return ips
-	}
-	return []string{target}
+    if strings.Contains(target, "/") {
+        ip, ipnet, err := net.ParseCIDR(target)
+        if err != nil {
+            return []string{target}
+        }
+        var ips []string
+        for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); inc(ip) {  
+            ips = append(ips, ip.String())
+        }
+        return ips
+    }
+    return []string{target}
 }
 
 func inc(ip net.IP) {
@@ -564,22 +563,19 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 }
 
 func findSimilarKey(key string) string {
-	parts := strings.Split(key, " ")
-	if len(parts) < 2 {
-		return ""
-	}
-	service := parts[0]
-	version := parts[1]
+    parts := strings.Split(key, " ")
+    if len(parts) < 2 {
+        return ""
+    }
+    service := parts[0]
 
-	// Simple heuristic: find a key with the same service and similar version
-	for k := range vulnDB {
-		if strings.HasPrefix(k, service) {
-			// Check if versions are similar (e.g., 2.4.51 ~ 2.4.49)
-			// This is a placeholder; implement actual logic as needed
-			return k
-		}
-	}
-	return ""
+    // Simple heuristic: find a key with the same service
+    for k := range vulnDB {
+        if strings.HasPrefix(k, service) {
+            return k
+        }
+    }
+    return ""
 }
 
 func loadCustomCVEs() {
