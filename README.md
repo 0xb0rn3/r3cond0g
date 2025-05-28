@@ -1,4 +1,4 @@
-# r3cond0g v0.2.0 - Enhanced Network Reconnaissance Tool
+# r3cond0g Network Reconnaissance Tool
 
 **Authors:** 0xbv1 | 0xn0rn3
 
