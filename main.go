@@ -20,7 +20,7 @@ import (
 )
 
 // VERSION is the current version of the tool
-const VERSION = "0.2.2"
+const VERSION = "0.2.2 ReconRaptor"
 const AUTHORS = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
 
 // Config for the tool's configuration
