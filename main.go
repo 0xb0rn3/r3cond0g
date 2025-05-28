@@ -1,0 +1,679 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const VERSION = "0.2.0"
+const AUTHORS = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
+
+// Config for the tool's configuration
+type Config struct {
+	TargetHost      string `json:"target_host"`
+	PortRange       string `json:"port_range"`
+	ScanTimeout     int    `json:"scan_timeout"`
+	MaxConcurrency  int    `json:"max_concurrency"`
+	OutputFile      string `json:"output_file"`
+	UDPScan         bool   `json:"udp_scan"`
+	VulnMapping     bool   `json:"vuln_mapping"`
+	TopologyMapping bool   `json:"topology_mapping"`
+	NVDAPIKey       string `json:"nvd_api_key"`
+	NmapResultsFile string `json:"nmap_results_file"`
+	OnlyOpenPorts   bool   `json:"only_open_ports"`
+}
+
+// ScanResult with vulnerability data
+type EnhancedScanResult struct {
+	Host            string        `json:"host"`
+	Port            int           `json:"port"`
+	Protocol        string        `json:"protocol"`
+	State           string        `json:"state"`
+	Service         string        `json:"service,omitempty"`
+	Version         string        `json:"version,omitempty"`
+	ResponseTime    time.Duration `json:"response_time"`
+	Timestamp       time.Time     `json:"timestamp"`
+	Vulnerabilities []string      `json:"vulnerabilities,omitempty"`
+}
+
+// NmapRun represents the root XML structure
+type NmapRun struct {
+	XMLName xml.Name   `xml:"nmaprun"`
+	Hosts   []NmapHost `xml:"host"`
+}
+
+// NmapHost represents a host in nmap results
+type NmapHost struct {
+	Address NmapAddress `xml:"address"`
+	Ports   NmapPorts   `xml:"ports"`
+}
+
+// NmapAddress represents host address
+type NmapAddress struct {
+	Addr string `xml:"addr,attr"`
+}
+
+// NmapPorts contains port information
+type NmapPorts struct {
+	Ports []NmapPort `xml:"port"`
+}
+
+// NmapPort represents individual port data
+type NmapPort struct {
+	Protocol string      `xml:"protocol,attr"`
+	PortID   int         `xml:"portid,attr"`
+	State    NmapState   `xml:"state"`
+	Service  NmapService `xml:"service"`
+}
+
+// NmapState represents port state
+type NmapState struct {
+	State string `xml:"state,attr"`
+}
+
+// NmapService represents service information
+type NmapService struct {
+	Name    string `xml:"name,attr"`
+	Version string `xml:"version,attr"`
+}
+
+var (
+	config = Config{
+		TargetHost:      "192.168.1.1",
+		PortRange:       "1-1000",
+		ScanTimeout:     500,
+		MaxConcurrency:  100,
+		OutputFile:      "scan_results",
+		UDPScan:         false,
+		VulnMapping:     false,
+		TopologyMapping: false,
+		NVDAPIKey:       "",
+		NmapResultsFile: "",
+		OnlyOpenPorts:   true,
+	}
+	results      []EnhancedScanResult
+	mutex        sync.Mutex
+	wg           sync.WaitGroup
+	sem          chan struct{}
+	scannedPorts int64
+)
+
+func main() {
+	printBanner()
+	for {
+		showMenu()
+		choice := getUserChoice()
+		switch choice {
+		case 1:
+			results = runUltraFastScan()
+		case 2:
+			configureSettings()
+		case 3:
+			displayResults()
+		case 4:
+			saveResults()
+		case 5:
+			parseNmapResults()
+		case 6:
+			performVulnerabilityMapping()
+		case 7:
+			generateTopologyMap()
+		case 8:
+			exportResults()
+		case 9:
+			fmt.Println("👋 Exiting r3cond0g v" + VERSION)
+			return
+		default:
+			fmt.Println("❌ Invalid option.")
+		}
+	}
+}
+
+func printBanner() {
+	fmt.Printf(`
+██████╗ ██████╗  ██████╗ ██████╗ ███╗   ██╗██████╗  ██████╗  ██████╗ 
+██╔══██╗╚════██╗██╔════╝██╔═████╗████╗  ██║██╔══██╗██╔═████╗██╔════╝ 
+██████╔╝ █████╔╝██║     ██║██╔██║██╔██╗ ██║██║  ██║██║██╔██║██║  ███╗
+██╔══██╗ ╚═══██╗██║     ████╔╝██║██║╚██╗██║██║  ██║████╔╝██║██║   ██║
+██║  ██║██████╔╝╚██████╗╚██████╔╝██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝
+╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ 𓃦
+
+       Advanced RedTeaming Network Recon Tool v%s
+                    By %s
+`, VERSION, AUTHORS)
+}
+
+func showMenu() {
+	fmt.Println("\n=== r3cond0g𓃦 - Advanced Network Recon Tool ===")
+	fmt.Println("1. 🚀 Run Ultra-Fast Scan")
+	fmt.Println("2. 🛠️  Configure Settings")
+	fmt.Println("3. 📋 Display Results")
+	fmt.Println("4. 💾 Save Results")
+	fmt.Println("5. 📄 Parse Nmap Results")
+	fmt.Println("6. 🔍 Perform Vulnerability Mapping")
+	fmt.Println("7. 🌐 Generate Network Topology")
+	fmt.Println("8. 📤 Export Results")
+	fmt.Println("9. ❌ Exit")
+	fmt.Print("Choose an option: ")
+}
+
+func getUserChoice() int {
+	var choice int
+	fmt.Scanln(&choice)
+	return choice
+}
+
+func askForBool(prompt string) bool {
+	fmt.Print(prompt)
+	var input string
+	fmt.Scanln(&input)
+	return strings.ToLower(input) == "true" || strings.ToLower(input) == "y"
+}
+
+func askForString(prompt string) string {
+	fmt.Print(prompt)
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	return strings.TrimSpace(input)
+}
+
+func configureSettings() {
+	for {
+		fmt.Println("\n=== ⚙️ Enhanced Settings ===")
+		fmt.Printf("1. 🎯 Target Host: %s\n", config.TargetHost)
+		fmt.Printf("2. 🔢 Port Range: %s\n", config.PortRange)
+		fmt.Printf("3. ⏱️ Scan Timeout (ms): %d\n", config.ScanTimeout)
+		fmt.Printf("4. 🔄 Max Concurrency: %d\n", config.MaxConcurrency)
+		fmt.Printf("5. 📄 Output File: %s\n", config.OutputFile)
+		fmt.Printf("6. 🛡️ UDP Scan: %t\n", config.UDPScan)
+		fmt.Printf("7. 🔍 Vulnerability Mapping: %t\n", config.VulnMapping)
+		fmt.Printf("8. 🌐 Topology Mapping: %t\n", config.TopologyMapping)
+		fmt.Printf("9. 🔑 NVD API Key: %s\n", maskAPIKey(config.NVDAPIKey))
+		fmt.Printf("10. 📁 Nmap Results File: %s\n", config.NmapResultsFile)
+		fmt.Printf("11. 🎯 Only Open Ports: %t\n", config.OnlyOpenPorts)
+		fmt.Println("0. ◀️ Back to main menu")
+		fmt.Print("⚙️ Choose a setting to edit: ")
+
+		choice := getUserChoice()
+		switch choice {
+		case 1:
+			config.TargetHost = askForString("🎯 Enter target host(s) (comma-separated): ")
+		case 2:
+			config.PortRange = askForString("🔢 Enter port range (e.g., 1-1000): ")
+		case 3:
+			fmt.Print("⏱️ Enter scan timeout (ms): ")
+			fmt.Scanln(&config.ScanTimeout)
+		case 4:
+			fmt.Print("🔄 Enter max concurrency: ")
+			fmt.Scanln(&config.MaxConcurrency)
+		case 5:
+			config.OutputFile = askForString("📄 Enter output file name: ")
+		case 6:
+			config.UDPScan = askForBool("🛡️ Enable UDP scanning? (true/false): ")
+		case 7:
+			config.VulnMapping = askForBool("🔍 Enable vulnerability mapping? (true/false): ")
+		case 8:
+			config.TopologyMapping = askForBool("🌐 Enable network topology mapping? (true/false): ")
+		case 9:
+			config.NVDAPIKey = askForString("🔑 Enter NVD API Key: ")
+		case 10:
+			config.NmapResultsFile = askForString("📁 Enter Nmap results file path: ")
+		case 11:
+			config.OnlyOpenPorts = askForBool("🎯 Show only open ports? (true/false): ")
+		case 0:
+			return
+		default:
+			fmt.Println("❌ Invalid choice.")
+		}
+	}
+}
+
+func maskAPIKey(key string) string {
+	if len(key) == 0 {
+		return "Not set"
+	}
+	if len(key) <= 8 {
+		return strings.Repeat("*", len(key))
+	}
+	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+}
+
+func parsePortRange(portRange string) []int {
+	var ports []int
+	ranges := strings.Split(portRange, ",")
+
+	for _, r := range ranges {
+		r = strings.TrimSpace(r)
+		if strings.Contains(r, "-") {
+			parts := strings.Split(r, "-")
+			start, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+			end, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			for i := start; i <= end; i++ {
+				ports = append(ports, i)
+			}
+		} else {
+			port, _ := strconv.Atoi(r)
+			if port > 0 {
+				ports = append(ports, port)
+			}
+		}
+	}
+	return ports
+}
+
+func scanTCPPort(host string, port int) *EnhancedScanResult {
+	timeout := time.Duration(config.ScanTimeout) * time.Millisecond
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	result := &EnhancedScanResult{
+		Host:         host,
+		Port:         port,
+		Protocol:     "tcp",
+		State:        "open",
+		ResponseTime: time.Since(start),
+		Timestamp:    time.Now(),
+	}
+
+	// Enhanced service detection
+	result.Service, result.Version = detectService(host, port, "tcp")
+	return result
+}
+
+func scanUDPPort(host string, port int) *EnhancedScanResult {
+	timeout := time.Duration(config.ScanTimeout) * time.Millisecond
+	start := time.Now()
+	conn, err := net.DialTimeout("udp", fmt.Sprintf("%s:%d", host, port), timeout)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	// Send probe packet
+	_, err = conn.Write([]byte("probe"))
+	if err != nil {
+		return nil
+	}
+
+	buffer := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	n, err := conn.Read(buffer)
+	if err != nil || n == 0 {
+		return nil
+	}
+
+	result := &EnhancedScanResult{
+		Host:         host,
+		Port:         port,
+		Protocol:     "udp",
+		State:        "open",
+		ResponseTime: time.Since(start),
+		Timestamp:    time.Now(),
+	}
+
+	result.Service, result.Version = detectService(host, port, "udp")
+	return result
+}
+
+func detectService(host string, port int, protocol string) (string, string) {
+	// Common service mappings
+	services := map[int]string{
+		21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
+		53: "dns", 80: "http", 110: "pop3", 143: "imap",
+		443: "https", 993: "imaps", 995: "pop3s",
+		3306: "mysql", 5432: "postgresql", 6379: "redis",
+		27017: "mongodb", 3389: "rdp", 5985: "winrm",
+	}
+
+	service, exists := services[port]
+	if !exists {
+		service = "unknown"
+	}
+
+	return service, "unknown"
+}
+
+func mapVulnerabilities(result *EnhancedScanResult) {
+	if config.NVDAPIKey == "" {
+		return
+	}
+
+	query := fmt.Sprintf("%s %s", result.Service, result.Version)
+	url := fmt.Sprintf("https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=%s", query)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("apiKey", config.NVDAPIKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	var nvdResponse struct {
+		Vulnerabilities []struct {
+			CVE struct {
+				ID string `json:"id"`
+			} `json:"cve"`
+		} `json:"vulnerabilities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&nvdResponse); err != nil {
+		return
+	}
+
+	for _, vuln := range nvdResponse.Vulnerabilities {
+		result.Vulnerabilities = append(result.Vulnerabilities, vuln.CVE.ID)
+	}
+}
+
+func runUltraFastScan() []EnhancedScanResult {
+	fmt.Println("🚀 Starting ultra-fast scan...")
+	hosts := strings.Split(config.TargetHost, ",")
+	ports := parsePortRange(config.PortRange)
+	sem = make(chan struct{}, config.MaxConcurrency)
+	results = nil
+	scannedPorts = 0
+
+	start := time.Now()
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		for _, port := range ports {
+			wg.Add(1)
+			go func(h string, p int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				// TCP scan
+				if result := scanTCPPort(h, p); result != nil {
+					if config.VulnMapping {
+						mapVulnerabilities(result)
+					}
+					mutex.Lock()
+					results = append(results, *result)
+					mutex.Unlock()
+				}
+
+				// UDP scan if enabled
+				if config.UDPScan {
+					if result := scanUDPPort(h, p); result != nil {
+						if config.VulnMapping {
+							mapVulnerabilities(result)
+						}
+						mutex.Lock()
+						results = append(results, *result)
+						mutex.Unlock()
+					}
+				}
+
+				atomic.AddInt64(&scannedPorts, 1)
+				if scannedPorts%100 == 0 {
+					fmt.Printf("\r🔍 Scanned %d ports...", scannedPorts)
+				}
+			}(host, port)
+		}
+	}
+
+	wg.Wait()
+	fmt.Printf("\n✅ Scan completed in %v\n", time.Since(start))
+	fmt.Printf("📊 Found %d open ports\n", len(results))
+
+	return results
+}
+
+func parseNmapResults() {
+	if config.NmapResultsFile == "" {
+		config.NmapResultsFile = askForString("📁 Enter Nmap XML results file path: ")
+	}
+
+	file, err := os.Open(config.NmapResultsFile)
+	if err != nil {
+		fmt.Printf("❌ Error opening file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		fmt.Printf("❌ Error reading file: %v\n", err)
+		return
+	}
+
+	var nmapRun NmapRun
+	if err := xml.Unmarshal(data, &nmapRun); err != nil {
+		fmt.Printf("❌ Error parsing XML: %v\n", err)
+		return
+	}
+
+	results = nil
+	for _, host := range nmapRun.Hosts {
+		for _, port := range host.Ports.Ports {
+			if !config.OnlyOpenPorts || port.State.State == "open" {
+				result := EnhancedScanResult{
+					Host:      host.Address.Addr,
+					Port:      port.PortID,
+					Protocol:  port.Protocol,
+					State:     port.State.State,
+					Service:   port.Service.Name,
+					Version:   port.Service.Version,
+					Timestamp: time.Now(),
+				}
+
+				if config.VulnMapping {
+					mapVulnerabilities(&result)
+				}
+
+				results = append(results, result)
+			}
+		}
+	}
+
+	fmt.Printf("✅ Parsed %d ports from Nmap results\n", len(results))
+}
+
+func performVulnerabilityMapping() {
+	if len(results) == 0 {
+		fmt.Println("❌ No scan results available. Run a scan first.")
+		return
+	}
+
+	if config.NVDAPIKey == "" {
+		config.NVDAPIKey = askForString("🔑 Enter NVD API Key: ")
+	}
+
+	fmt.Println("🔍 Mapping vulnerabilities...")
+	for i := range results {
+		mapVulnerabilities(&results[i])
+		fmt.Printf("\r🔍 Processed %d/%d hosts", i+1, len(results))
+	}
+	fmt.Println("\n✅ Vulnerability mapping completed")
+}
+
+func generateTopologyMap() {
+	if len(results) == 0 {
+		fmt.Println("❌ No scan results available. Run a scan first.")
+		return
+	}
+
+	fmt.Println("🌐 Generating network topology map...")
+
+	// Create DOT format graph
+	var dotGraph strings.Builder
+	dotGraph.WriteString("graph NetworkTopology {\n")
+	dotGraph.WriteString("  rankdir=LR;\n")
+	dotGraph.WriteString("  node [shape=box, style=rounded];\n")
+
+	hostPorts := make(map[string][]int)
+	for _, result := range results {
+		if result.State == "open" {
+			hostPorts[result.Host] = append(hostPorts[result.Host], result.Port)
+		}
+	}
+
+	for host, ports := range hostPorts {
+		label := fmt.Sprintf("%s\\n(%d open ports)", host, len(ports))
+		dotGraph.WriteString(fmt.Sprintf("  \"%s\" [label=\"%s\"];\n", host, label))
+	}
+
+	dotGraph.WriteString("}\n")
+
+	filename := fmt.Sprintf("%s-topology.dot", config.OutputFile)
+	if err := os.WriteFile(filename, []byte(dotGraph.String()), 0644); err != nil {
+		fmt.Printf("❌ Failed to write topology file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("✅ Network topology saved to %s\n", filename)
+	fmt.Println("💡 Use Graphviz to visualize: dot -Tpng topology.dot -o topology.png")
+}
+
+func displayResults() {
+	if len(results) == 0 {
+		fmt.Println("❌ No results to display. Run a scan first.")
+		return
+	}
+
+	fmt.Printf("\n📊 Scan Results (%d ports found):\n", len(results))
+	fmt.Println("┌─────────────────┬──────┬──────────┬─────────┬─────────────┬──────────────────┐")
+	fmt.Println("│      Host       │ Port │ Protocol │  State  │   Service   │   Vulnerabilities │")
+	fmt.Println("├─────────────────┼──────┼──────────┼─────────┼─────────────┼──────────────────┤")
+
+	for _, result := range results {
+		if config.OnlyOpenPorts && result.State != "open" {
+			continue
+		}
+
+		vulnCount := len(result.Vulnerabilities)
+		vulnStr := "None"
+		if vulnCount > 0 {
+			vulnStr = fmt.Sprintf("%d CVEs", vulnCount)
+		}
+
+		fmt.Printf("│ %-15s │ %4d │ %-8s │ %-7s │ %-11s │ %-16s │\n",
+			result.Host, result.Port, result.Protocol,
+			result.State, result.Service, vulnStr)
+	}
+	fmt.Println("└─────────────────┴──────┴──────────┴─────────┴─────────────┴──────────────────┘")
+}
+
+func saveResults() {
+	if len(results) == 0 {
+		fmt.Println("❌ No results to save. Run a scan first.")
+		return
+	}
+
+	filename := fmt.Sprintf("%s.json", config.OutputFile)
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		fmt.Printf("❌ Error marshaling results: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(filename, data, 0644); err != nil {
+		fmt.Printf("❌ Error writing file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("✅ Results saved to %s\n", filename)
+}
+
+func exportResults() {
+	if len(results) == 0 {
+		fmt.Println("❌ No results to export. Run a scan first.")
+		return
+	}
+
+	fmt.Println("📤 Choose export format:")
+	fmt.Println("1. JSON")
+	fmt.Println("2. CSV")
+	fmt.Println("3. XML")
+	fmt.Print("Choose format: ")
+
+	choice := getUserChoice()
+	switch choice {
+	case 1:
+		exportJSON()
+	case 2:
+		exportCSV()
+	case 3:
+		exportXML()
+	default:
+		fmt.Println("❌ Invalid choice.")
+	}
+}
+
+func exportJSON() {
+	saveResults() // Reuse existing JSON export
+}
+
+func exportCSV() {
+	filename := fmt.Sprintf("%s.csv", config.OutputFile)
+	file, err := os.Create(filename)
+	if err != nil {
+		fmt.Printf("❌ Error creating CSV file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	// CSV header
+	writer.WriteString("Host,Port,Protocol,State,Service,Version,ResponseTime,Vulnerabilities\n")
+
+	for _, result := range results {
+		vulns := strings.Join(result.Vulnerabilities, ";")
+		line := fmt.Sprintf("%s,%d,%s,%s,%s,%s,%s,%s\n",
+			result.Host, result.Port, result.Protocol, result.State,
+			result.Service, result.Version, result.ResponseTime.String(), vulns)
+		writer.WriteString(line)
+	}
+
+	fmt.Printf("✅ CSV results exported to %s\n", filename)
+}
+
+func exportXML() {
+	filename := fmt.Sprintf("%s.xml", config.OutputFile)
+	file, err := os.Create(filename)
+	if err != nil {
+		fmt.Printf("❌ Error creating XML file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	type XMLResults struct {
+		XMLName xml.Name             `xml:"scan_results"`
+		Results []EnhancedScanResult `xml:"result"`
+	}
+
+	xmlResults := XMLResults{Results: results}
+	data, err := xml.MarshalIndent(xmlResults, "", "  ")
+	if err != nil {
+		fmt.Printf("❌ Error marshaling XML: %v\n", err)
+		return
+	}
+
+	file.WriteString(xml.Header)
+	file.Write(data)
+	fmt.Printf("✅ XML results exported to %s\n", filename)
+}
