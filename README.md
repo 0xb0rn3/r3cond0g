@@ -91,12 +91,12 @@ go build -o r3cond0g main.go
 - **Results Filtering** - Show only open ports
 
 ## 🔧 Dependencies
-
+```bash
 - Go 1.16+ (automatically installed by runner script)
 - Network access for target scanning
 - NVD API key for vulnerability mapping (optional)
 - Graphviz for topology visualization (optional)
-
+```
 ## 📊 Output Formats
 
 ### Console Display
@@ -134,25 +134,27 @@ nmap -sS -O -sV -oX scan.xml target_network
 ```
 
 ## 📝 License
-
+```bash
 This tool is for educational and authorized security testing purposes only. Users are responsible for compliance with applicable laws and regulations.
-
+```
 ## 🐛 Troubleshooting
 
 ### Common Issues
+
 - **Permission Denied**: Ensure script is executable (`chmod +x run`)
 - **Go Not Found**: Runner script will auto-install Go
 - **Compilation Errors**: Check Go version (requires 1.16+)
 - **Network Timeouts**: Adjust scan timeout in configuration
 
 ### Performance Tuning
+```bash
 - Reduce concurrency for unstable networks
 - Increase timeout for slow targets
 - Use TCP-only scanning for faster results
 - Filter to open ports only for cleaner output
-
+```
 ---
-
+```bash
 **Version:** 0.2.0  
-**Last Updated:** $(date +"%Y-%m-%d")  
 **Platform:** Cross-platform (Linux, macOS, Windows)
+```
