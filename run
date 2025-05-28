@@ -376,7 +376,7 @@ needs_recompilation() {
 
 # Function to show help information
 show_help() {
-    echo "r3cond0g Runner Script v0.2"
+    echo "r3cond0g Runner Script v0.1"
     echo
     echo "Usage: $0 [OPTIONS]"
     echo
@@ -463,6 +463,7 @@ main() {
     echo
     
     # Execute the compiled binary
+     clear
     ./r3cond0g
 }
 
