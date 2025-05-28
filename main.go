@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"encoding/json"
 	"encoding/xml"
+	"flag"
 	"fmt"
+	"html/template"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,12 +20,14 @@ import (
 	"time"
 )
 
-const VERSION = "0.2.0"
+// VERSION is the current version of the tool
+const VERSION = "0.2.2"
 const AUTHORS = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
 
 // Config for the tool's configuration
 type Config struct {
 	TargetHost      string `json:"target_host"`
+	TargetFile      string `json:"target_file"`
 	PortRange       string `json:"port_range"`
 	ScanTimeout     int    `json:"scan_timeout"`
 	MaxConcurrency  int    `json:"max_concurrency"`
@@ -32,9 +38,10 @@ type Config struct {
 	NVDAPIKey       string `json:"nvd_api_key"`
 	NmapResultsFile string `json:"nmap_results_file"`
 	OnlyOpenPorts   bool   `json:"only_open_ports"`
+	CVEPluginFile   string `json:"cve_plugin_file"`
 }
 
-// ScanResult with vulnerability data
+// EnhancedScanResult with vulnerability data and OS guess
 type EnhancedScanResult struct {
 	Host            string        `json:"host"`
 	Port            int           `json:"port"`
@@ -45,6 +52,7 @@ type EnhancedScanResult struct {
 	ResponseTime    time.Duration `json:"response_time"`
 	Timestamp       time.Time     `json:"timestamp"`
 	Vulnerabilities []string      `json:"vulnerabilities,omitempty"`
+	OSGuess         string        `json:"os_guess,omitempty"`
 }
 
 // NmapRun represents the root XML structure
@@ -90,7 +98,8 @@ type NmapService struct {
 
 var (
 	config = Config{
-		TargetHost:      "192.168.1.1",
+		TargetHost:      "",
+		TargetFile:      "",
 		PortRange:       "1-1000",
 		ScanTimeout:     500,
 		MaxConcurrency:  100,
@@ -101,16 +110,26 @@ var (
 		NVDAPIKey:       "",
 		NmapResultsFile: "",
 		OnlyOpenPorts:   true,
+		CVEPluginFile:   "",
 	}
 	results      []EnhancedScanResult
 	mutex        sync.Mutex
 	wg           sync.WaitGroup
 	sem          chan struct{}
 	scannedPorts int64
+	vulnDB       = map[string][]string{
+		"http Apache 2.4.49": {"CVE-2021-41773", "CVE-2021-42013"},
+		"ssh OpenSSH 7.6":    {"CVE-2018-15473"},
+	}
+	nvdCache     = make(map[string][]string)
+	customCVEs   = make(map[string][]string)
 )
 
 func main() {
 	printBanner()
+	loadConfigFromEnv()
+	parseCommandLineFlags()
+	loadCustomCVEs()
 	for {
 		showMenu()
 		choice := getUserChoice()
@@ -192,45 +211,51 @@ func configureSettings() {
 	for {
 		fmt.Println("\n=== ⚙️ Enhanced Settings ===")
 		fmt.Printf("1. 🎯 Target Host: %s\n", config.TargetHost)
-		fmt.Printf("2. 🔢 Port Range: %s\n", config.PortRange)
-		fmt.Printf("3. ⏱️ Scan Timeout (ms): %d\n", config.ScanTimeout)
-		fmt.Printf("4. 🔄 Max Concurrency: %d\n", config.MaxConcurrency)
-		fmt.Printf("5. 📄 Output File: %s\n", config.OutputFile)
-		fmt.Printf("6. 🛡️ UDP Scan: %t\n", config.UDPScan)
-		fmt.Printf("7. 🔍 Vulnerability Mapping: %t\n", config.VulnMapping)
-		fmt.Printf("8. 🌐 Topology Mapping: %t\n", config.TopologyMapping)
-		fmt.Printf("9. 🔑 NVD API Key: %s\n", maskAPIKey(config.NVDAPIKey))
-		fmt.Printf("10. 📁 Nmap Results File: %s\n", config.NmapResultsFile)
-		fmt.Printf("11. 🎯 Only Open Ports: %t\n", config.OnlyOpenPorts)
+		fmt.Printf("2. 📁 Target File: %s\n", config.TargetFile)
+		fmt.Printf("3. 🔢 Port Range: %s\n", config.PortRange)
+		fmt.Printf("4. ⏱️ Scan Timeout (ms): %d\n", config.ScanTimeout)
+		fmt.Printf("5. 🔄 Max Concurrency: %d\n", config.MaxConcurrency)
+		fmt.Printf("6. 📄 Output File: %s\n", config.OutputFile)
+		fmt.Printf("7. 🛡️ UDP Scan: %t\n", config.UDPScan)
+		fmt.Printf("8. 🔍 Vulnerability Mapping: %t\n", config.VulnMapping)
+		fmt.Printf("9. 🌐 Topology Mapping: %t\n", config.TopologyMapping)
+		fmt.Printf("10. 🔑 NVD API Key: %s\n", maskAPIKey(config.NVDAPIKey))
+		fmt.Printf("11. 📁 Nmap Results File: %s\n", config.NmapResultsFile)
+		fmt.Printf("12. 🎯 Only Open Ports: %t\n", config.OnlyOpenPorts)
+		fmt.Printf("13. 📄 CVE Plugin File: %s\n", config.CVEPluginFile)
 		fmt.Println("0. ◀️ Back to main menu")
 		fmt.Print("⚙️ Choose a setting to edit: ")
 
 		choice := getUserChoice()
 		switch choice {
 		case 1:
-			config.TargetHost = askForString("🎯 Enter target host(s) (comma-separated): ")
+			config.TargetHost = askForString("🎯 Enter target host(s) (comma-separated or CIDR): ")
 		case 2:
-			config.PortRange = askForString("🔢 Enter port range (e.g., 1-1000): ")
+			config.TargetFile = askForString("📁 Enter target file path: ")
 		case 3:
+			config.PortRange = askForString("🔢 Enter port range (e.g., 1-1000): ")
+		case 4:
 			fmt.Print("⏱️ Enter scan timeout (ms): ")
 			fmt.Scanln(&config.ScanTimeout)
-		case 4:
+		case 5:
 			fmt.Print("🔄 Enter max concurrency: ")
 			fmt.Scanln(&config.MaxConcurrency)
-		case 5:
-			config.OutputFile = askForString("📄 Enter output file name: ")
 		case 6:
-			config.UDPScan = askForBool("🛡️ Enable UDP scanning? (true/false): ")
+			config.OutputFile = askForString("📄 Enter output file name: ")
 		case 7:
-			config.VulnMapping = askForBool("🔍 Enable vulnerability mapping? (true/false): ")
+			config.UDPScan = askForBool("🛡️ Enable UDP scanning? (true/false): ")
 		case 8:
-			config.TopologyMapping = askForBool("🌐 Enable network topology mapping? (true/false): ")
+			config.VulnMapping = askForBool("🔍 Enable vulnerability mapping? (true/false): ")
 		case 9:
-			config.NVDAPIKey = askForString("🔑 Enter NVD API Key: ")
+			config.TopologyMapping = askForBool("🌐 Enable network topology mapping? (true/false): ")
 		case 10:
-			config.NmapResultsFile = askForString("📁 Enter Nmap results file path: ")
+			config.NVDAPIKey = askForString("🔑 Enter NVD API Key: ")
 		case 11:
+			config.NmapResultsFile = askForString("📁 Enter Nmap results file path: ")
+		case 12:
 			config.OnlyOpenPorts = askForBool("🎯 Show only open ports? (true/false): ")
+		case 13:
+			config.CVEPluginFile = askForString("📄 Enter CVE plugin file path: ")
 		case 0:
 			return
 		default:
@@ -252,7 +277,6 @@ func maskAPIKey(key string) string {
 func parsePortRange(portRange string) []int {
 	var ports []int
 	ranges := strings.Split(portRange, ",")
-
 	for _, r := range ranges {
 		r = strings.TrimSpace(r)
 		if strings.Contains(r, "-") {
@@ -270,6 +294,56 @@ func parsePortRange(portRange string) []int {
 		}
 	}
 	return ports
+}
+
+func parseTargets(targets string, targetFile string) []string {
+	var ips []string
+	if targetFile != "" {
+		file, err := os.Open(targetFile)
+		if err != nil {
+			fmt.Printf("❌ Error opening target file: %v\n", err)
+			return ips
+		}
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				ips = append(ips, parseSingleTarget(line)...)
+			}
+		}
+	} else {
+		parts := strings.Split(targets, ",")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			ips = append(ips, parseSingleTarget(part)...)
+		}
+	}
+	return ips
+}
+
+func parseSingleTarget(target string) []string {
+	if strings.Contains(target, "/") {
+		ip, ipnet, err := net.ParseCIDR(target)
+		if err != nil {
+			return []string{target}
+		}
+		var ips []string
+		for ip := ip.Mask(ipStrainet.Mask); ipnet.Contains(ip); inc(ip) {
+			ips = append(ips, ip.String())
+		}
+		return ips
+	}
+	return []string{target}
+}
+
+func inc(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
 
 func scanTCPPort(host string, port int) *EnhancedScanResult {
@@ -291,7 +365,8 @@ func scanTCPPort(host string, port int) *EnhancedScanResult {
 	}
 
 	// Enhanced service detection
-	result.Service, result.Version = detectService(host, port, "tcp")
+	result.Service, result.Version = detectService(conn, port, "tcp")
+	result.OSGuess = guessOS(result)
 	return result
 }
 
@@ -326,12 +401,13 @@ func scanUDPPort(host string, port int) *EnhancedScanResult {
 		Timestamp:    time.Now(),
 	}
 
-	result.Service, result.Version = detectService(host, port, "udp")
+	result.Service, result.Version = detectService(conn, port, "udp")
+	result.OSGuess = guessOS(result)
 	return result
 }
 
-func detectService(host string, port int, protocol string) (string, string) {
-	// Common service mappings
+func detectService(conn net.Conn, port int, protocol string) (string, string) {
+	// Common service mappings as fallback
 	services := map[int]string{
 		21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
 		53: "dns", 80: "http", 110: "pop3", 143: "imap",
@@ -345,15 +421,88 @@ func detectService(host string, port int, protocol string) (string, string) {
 		service = "unknown"
 	}
 
+	// Probe for specific services
+	if protocol == "tcp" {
+		if probe, ok := portProbes[port]; ok {
+			s, v := probe.Detect(conn)
+			if s != "unknown" {
+				return s, v
+			}
+		}
+	}
+
 	return service, "unknown"
 }
 
+func guessOS(result *EnhancedScanResult) string {
+	switch result.Service {
+	case "http":
+		if strings.Contains(result.Version, "IIS") {
+			return "Windows"
+		} else if strings.Contains(result.Version, "Apache") {
+			return "Linux/Unix"
+		}
+	case "ssh":
+		if strings.Contains(result.Version, "OpenSSH") {
+			return "Linux/Unix"
+		}
+	}
+	return "Unknown"
+}
+
+type Probe interface {
+	Detect(conn net.Conn) (service string, version string)
+}
+
+type HTTPProbe struct{}
+
+func (p *HTTPProbe) Detect(conn net.Conn) (string, string) {
+	conn.Write([]byte("HEAD / HTTP/1.0\r\n\r\n"))
+	buffer := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return "http", "unknown"
+	}
+	response := string(buffer[:n])
+	if strings.HasPrefix(response, "HTTP/") {
+		lines := strings.Split(response, "\r\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Server:") {
+				server := strings.TrimSpace(strings.TrimPrefix(line, "Server:"))
+				return "http", server
+			}
+		}
+		return "http", "unknown"
+	}
+	return "unknown", "unknown"
+}
+
+var portProbes = map[int]Probe{
+	80:  &HTTPProbe{},
+	443: &HTTPProbe{}, // Assuming HTTPS uses the same probe for simplicity
+}
+
 func mapVulnerabilities(result *EnhancedScanResult) {
+	// Check custom CVEs first
+	key := fmt.Sprintf("%s %s", result.Service, result.Version)
+	if vulns, ok := customCVEs[key]; ok {
+		result.Vulnerabilities = vulns
+		return
+	}
+
+	// Check cache
+	if cached, ok := nvdCache[key]; ok {
+		result.Vulnerabilities = cached
+		return
+	}
+
 	if config.NVDAPIKey == "" {
 		return
 	}
 
-	query := fmt.Sprintf("%s %s", result.Service, result.Version)
+	// Enhanced query
+	query := fmt.Sprintf("%s %s %s %d %s", result.Service, result.Version, result.Host, result.Port, result.OSGuess)
 	url := fmt.Sprintf("https://services.nvd.nist.gov/rest/json/cves/2.0?keywordSearch=%s", query)
 
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -363,32 +512,105 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 	}
 
 	req.Header.Set("apiKey", config.NVDAPIKey)
-	resp, err := client.Do(req)
+
+	// Retry logic
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			retryAfter := resp.Header.Get("Retry-After")
+			if retryAfter != "" {
+				waitTime, _ := strconv.Atoi(retryAfter)
+				time.Sleep(time.Duration(waitTime) * time.Second)
+			} else {
+				time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			}
+			continue
+		}
+
+		var nvdResponse struct {
+			Vulnerabilities []struct {
+				CVE struct {
+					ID string `json:"id"`
+				} `json:"cve"`
+			} `json:"vulnerabilities"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&nvdResponse); err != nil {
+			return
+		}
+
+		for _, vuln := range nvdResponse.Vulnerabilities {
+			result.Vulnerabilities = append(result.Vulnerabilities, vuln.CVE.ID)
+		}
+
+		// Cache the result
+		nvdCache[key] = result.Vulnerabilities
+		return
+	}
+
+	// If no exact match, try heuristic matching
+	similarKey := findSimilarKey(key)
+	if similarKey != "" {
+		if vulns, ok := vulnDB[similarKey]; ok {
+			result.Vulnerabilities = vulns
+		}
+	}
+}
+
+func findSimilarKey(key string) string {
+	parts := strings.Split(key, " ")
+	if len(parts) < 2 {
+		return ""
+	}
+	service := parts[0]
+	version := parts[1]
+
+	// Simple heuristic: find a key with the same service and similar version
+	for k := range vulnDB {
+		if strings.HasPrefix(k, service) {
+			// Check if versions are similar (e.g., 2.4.51 ~ 2.4.49)
+			// This is a placeholder; implement actual logic as needed
+			return k
+		}
+	}
+	return ""
+}
+
+func loadCustomCVEs() {
+	if config.CVEPluginFile == "" {
+		return
+	}
+
+	file, err := os.Open(config.CVEPluginFile)
 	if err != nil {
+		fmt.Printf("❌ Error opening CVE plugin file: %v\n", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer file.Close()
 
-	var nvdResponse struct {
-		Vulnerabilities []struct {
-			CVE struct {
-				ID string `json:"id"`
-			} `json:"cve"`
-		} `json:"vulnerabilities"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&nvdResponse); err != nil {
+	data, err := io.ReadAll(file)
+	if err != nil {
+		fmt.Printf("❌ Error reading CVE plugin file: %v\n", err)
 		return
 	}
 
-	for _, vuln := range nvdResponse.Vulnerabilities {
-		result.Vulnerabilities = append(result.Vulnerabilities, vuln.CVE.ID)
+	if err := json.Unmarshal(data, &customCVEs); err != nil {
+		fmt.Printf("❌ Error parsing CVE plugin file: %v\n", err)
+		return
 	}
+
+	fmt.Println("✅ Loaded custom CVE mappings")
 }
 
 func runUltraFastScan() []EnhancedScanResult {
 	fmt.Println("🚀 Starting ultra-fast scan...")
-	hosts := strings.Split(config.TargetHost, ",")
+	hosts := parseTargets(config.TargetHost, config.TargetFile)
 	ports := parsePortRange(config.PortRange)
 	sem = make(chan struct{}, config.MaxConcurrency)
 	results = nil
@@ -396,7 +618,6 @@ func runUltraFastScan() []EnhancedScanResult {
 
 	start := time.Now()
 	for _, host := range hosts {
-		host = strings.TrimSpace(host)
 		for _, port := range ports {
 			wg.Add(1)
 			go func(h string, p int) {
@@ -437,7 +658,6 @@ func runUltraFastScan() []EnhancedScanResult {
 	wg.Wait()
 	fmt.Printf("\n✅ Scan completed in %v\n", time.Since(start))
 	fmt.Printf("📊 Found %d open ports\n", len(results))
-
 	return results
 }
 
@@ -517,7 +737,6 @@ func generateTopologyMap() {
 
 	fmt.Println("🌐 Generating network topology map...")
 
-	// Create DOT format graph
 	var dotGraph strings.Builder
 	dotGraph.WriteString("graph NetworkTopology {\n")
 	dotGraph.WriteString("  rankdir=LR;\n")
@@ -554,9 +773,9 @@ func displayResults() {
 	}
 
 	fmt.Printf("\n📊 Scan Results (%d ports found):\n", len(results))
-	fmt.Println("┌─────────────────┬──────┬──────────┬─────────┬─────────────┬──────────────────┐")
-	fmt.Println("│      Host       │ Port │ Protocol │  State  │   Service   │   Vulnerabilities │")
-	fmt.Println("├─────────────────┼──────┼──────────┼─────────┼─────────────┼──────────────────┤")
+	fmt.Println("┌─────────────────┬──────┬──────────┬─────────┬─────────────┬──────────────────┬────────────┐")
+	fmt.Println("│      Host       │ Port │ Protocol │  State  │   Service   │   Vulnerabilities │    OS      │")
+	fmt.Println("├─────────────────┼──────┼──────────┼─────────┼─────────────┼──────────────────┼────────────┤")
 
 	for _, result := range results {
 		if config.OnlyOpenPorts && result.State != "open" {
@@ -569,11 +788,11 @@ func displayResults() {
 			vulnStr = fmt.Sprintf("%d CVEs", vulnCount)
 		}
 
-		fmt.Printf("│ %-15s │ %4d │ %-8s │ %-7s │ %-11s │ %-16s │\n",
+		fmt.Printf("│ %-15s │ %4d │ %-8s │ %-7s │ %-11s │ %-16s │ %-10s │\n",
 			result.Host, result.Port, result.Protocol,
-			result.State, result.Service, vulnStr)
+			result.State, result.Service, vulnStr, result.OSGuess)
 	}
-	fmt.Println("└─────────────────┴──────┴──────────┴─────────┴─────────────┴──────────────────┘")
+	fmt.Println("└─────────────────┴──────┴──────────┴─────────┴─────────────┴──────────────────┴────────────┘")
 }
 
 func saveResults() {
@@ -607,6 +826,7 @@ func exportResults() {
 	fmt.Println("1. JSON")
 	fmt.Println("2. CSV")
 	fmt.Println("3. XML")
+	fmt.Println("4. HTML")
 	fmt.Print("Choose format: ")
 
 	choice := getUserChoice()
@@ -617,13 +837,15 @@ func exportResults() {
 		exportCSV()
 	case 3:
 		exportXML()
+	case 4:
+		exportHTML()
 	default:
 		fmt.Println("❌ Invalid choice.")
 	}
 }
 
 func exportJSON() {
-	saveResults() // Reuse existing JSON export
+	saveResults()
 }
 
 func exportCSV() {
@@ -638,14 +860,13 @@ func exportCSV() {
 	writer := bufio.NewWriter(file)
 	defer writer.Flush()
 
-	// CSV header
-	writer.WriteString("Host,Port,Protocol,State,Service,Version,ResponseTime,Vulnerabilities\n")
+	writer.WriteString("Host,Port,Protocol,State,Service,Version,ResponseTime,Vulnerabilities,OSGuess\n")
 
 	for _, result := range results {
 		vulns := strings.Join(result.Vulnerabilities, ";")
-		line := fmt.Sprintf("%s,%d,%s,%s,%s,%s,%s,%s\n",
+		line := fmt.Sprintf("%s,%d,%s,%s,%s,%s,%s,%s,%s\n",
 			result.Host, result.Port, result.Protocol, result.State,
-			result.Service, result.Version, result.ResponseTime.String(), vulns)
+			result.Service, result.Version, result.ResponseTime.String(), vulns, result.OSGuess)
 		writer.WriteString(line)
 	}
 
@@ -676,4 +897,85 @@ func exportXML() {
 	file.WriteString(xml.Header)
 	file.Write(data)
 	fmt.Printf("✅ XML results exported to %s\n", filename)
+}
+
+func exportHTML() {
+	filename := fmt.Sprintf("%s.html", config.OutputFile)
+	file, err := os.Create(filename)
+	if err != nil {
+		fmt.Printf("❌ Error creating HTML file: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	tmpl := template.Must(template.New("report").Parse(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>r3cond0g Scan Report</title>
+    <style>
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid black; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Scan Results</h1>
+    <table>
+        <tr>
+            <th>Host</th>
+            <th>Port</th>
+            <th>Protocol</th>
+            <th>State</th>
+            <th>Service</th>
+            <th>Version</th>
+            <th>Vulnerabilities</th>
+            <th>OS Guess</th>
+        </tr>
+        {{range .Results}}
+        <tr>
+            <td>{{.Host}}</td>
+            <td>{{.Port}}</td>
+            <td>{{.Protocol}}</td>
+            <td>{{.State}}</td>
+            <td>{{.Service}}</td>
+            <td>{{.Version}}</td>
+            <td>{{range .Vulnerabilities}}{{.}}, {{end}}</td>
+            <td>{{.OSGuess}}</td>
+        </tr>
+        {{end}}
+    </table>
+</body>
+</html>
+`))
+
+	if err := tmpl.Execute(file, struct{ Results []EnhancedScanResult }{results}); err != nil {
+		fmt.Printf("❌ Error generating HTML: %v\n", err)
+		return
+	}
+
+	fmt.Printf("✅ HTML report exported to %s\n", filename)
+}
+
+func loadConfigFromEnv() {
+	if config.NVDAPIKey == "" {
+		config.NVDAPIKey = os.Getenv("NVD_API_KEY")
+	}
+}
+
+func parseCommandLineFlags() {
+	flag.StringVar(&config.TargetHost, "target", config.TargetHost, "Target host(s) (comma-separated or CIDR)")
+	flag.StringVar(&config.TargetFile, "target-file", config.TargetFile, "File containing list of targets")
+	flag.StringVar(&config.PortRange, "ports", config.PortRange, "Port range (e.g., 1-1000)")
+	flag.IntVar(&config.ScanTimeout, "timeout", config.ScanTimeout, "Scan timeout in milliseconds")
+	flag.IntVar(&config.MaxConcurrency, "concurrency", config.MaxConcurrency, "Maximum concurrent scans")
+	flag.StringVar(&config.OutputFile, "output", config.OutputFile, "Output file name")
+	flag.BoolVar(&config.UDPScan, "udp", config.UDPScan, "Enable UDP scanning")
+	flag.BoolVar(&config.VulnMapping, "vuln", config.VulnMapping, "Enable vulnerability mapping")
+	flag.BoolVar(&config.TopologyMapping, "topology", config.TopologyMapping, "Enable network topology mapping")
+	flag.StringVar(&config.NVDAPIKey, "nvd-key", config.NVDAPIKey, "NVD API key")
+	flag.StringVar(&config.NmapResultsFile, "nmap-file", config.NmapResultsFile, "Nmap results XML file")
+	flag.BoolVar(&config.OnlyOpenPorts, "open-only", config.OnlyOpenPorts, "Show only open ports")
+	flag.StringVar(&config.CVEPluginFile, "cve-plugin", config.CVEPluginFile, "CVE plugin file path")
+	flag.Parse()
 }
