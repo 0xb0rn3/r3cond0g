@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 
-# r3cond0g Runner Script v0.1
-# Automated setup, compilation, and execution
+# Automated setup, compilation, and execution with update checking
 
 set -e  # Exit on any error
+
+# Configuration - Modify these for your repository
+REPO_URL="https://github.com/yourusername/r3cond0g.git"  # Replace with actual repo URL
+REPO_NAME="r3cond0g"
+UPDATE_CHECK_FILE=".last_update_check"
+UPDATE_CHECK_INTERVAL=3600  # Check for updates every hour (in seconds)
 
 # Colors for minimal visual feedback
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Function to print status messages
@@ -27,6 +33,10 @@ print_error() {
 
 print_warning() {
     echo -e "${YELLOW}[!]${NC} $1"
+}
+
+print_update() {
+    echo -e "${CYAN}[UPDATE]${NC} $1"
 }
 
 # Function to detect OS
@@ -47,6 +57,52 @@ detect_os() {
         echo "windows"
     else
         echo "unknown"
+    fi
+}
+
+# Function to install Git if not present
+install_git() {
+    local os=$(detect_os)
+    print_status "Installing Git for $os..."
+    
+    case $os in
+        "ubuntu")
+            sudo apt-get update -qq 2>/dev/null
+            sudo apt-get install -y git 2>/dev/null
+            ;;
+        "centos")
+            sudo yum install -y git 2>/dev/null
+            ;;
+        "arch")
+            sudo pacman -S --noconfirm git 2>/dev/null
+            ;;
+        "macos")
+            if command -v brew &> /dev/null; then
+                brew install git 2>/dev/null
+            else
+                print_error "Homebrew not found. Please install Git manually"
+                exit 1
+            fi
+            ;;
+        "windows")
+            print_warning "Windows detected. Please install Git manually from https://git-scm.com/"
+            exit 1
+            ;;
+        *)
+            print_error "Unsupported OS. Please install Git manually"
+            exit 1
+            ;;
+    esac
+}
+
+# Function to check if Git is installed
+check_git() {
+    if ! command -v git &> /dev/null; then
+        print_warning "Git not found. Installing..."
+        install_git
+        print_success "Git installation completed"
+    else
+        print_success "Git found: $(git --version | cut -d' ' -f3)"
     fi
 }
 
@@ -95,6 +151,177 @@ check_golang() {
     else
         print_success "Go found: $(go version | cut -d' ' -f3)"
     fi
+}
+
+# Function to get current local commit hash
+get_local_commit() {
+    if [ -d ".git" ]; then
+        git rev-parse HEAD 2>/dev/null || echo "unknown"
+    else
+        echo "not_a_repo"
+    fi
+}
+
+# Function to get remote commit hash
+get_remote_commit() {
+    # This gets the latest commit hash from the remote repository without downloading
+    git ls-remote "$REPO_URL" HEAD 2>/dev/null | cut -f1 || echo "unknown"
+}
+
+# Function to check if we should check for updates (based on time interval)
+should_check_updates() {
+    if [ ! -f "$UPDATE_CHECK_FILE" ]; then
+        return 0  # No check file exists, should check
+    fi
+    
+    local last_check=$(cat "$UPDATE_CHECK_FILE" 2>/dev/null || echo "0")
+    local current_time=$(date +%s)
+    local time_diff=$((current_time - last_check))
+    
+    if [ $time_diff -gt $UPDATE_CHECK_INTERVAL ]; then
+        return 0  # Time interval exceeded, should check
+    else
+        return 1  # Too soon to check again
+    fi
+}
+
+# Function to update the last check timestamp
+update_check_timestamp() {
+    date +%s > "$UPDATE_CHECK_FILE"
+}
+
+# Function to check for updates
+check_for_updates() {
+    print_status "Checking for updates..."
+    
+    # Update the timestamp regardless of outcome
+    update_check_timestamp
+    
+    local local_commit=$(get_local_commit)
+    local remote_commit=$(get_remote_commit)
+    
+    if [ "$remote_commit" = "unknown" ]; then
+        print_warning "Unable to check for updates (network/repository issue)"
+        return 1
+    fi
+    
+    if [ "$local_commit" = "not_a_repo" ]; then
+        print_warning "Current directory is not a Git repository"
+        return 1
+    fi
+    
+    if [ "$local_commit" = "unknown" ]; then
+        print_warning "Unable to determine local version"
+        return 1
+    fi
+    
+    if [ "$local_commit" = "$remote_commit" ]; then
+        print_success "You have the latest version"
+        return 1
+    else
+        print_update "New update available!"
+        print_update "Current: ${local_commit:0:8}"
+        print_update "Latest:  ${remote_commit:0:8}"
+        return 0
+    fi
+}
+
+# Function to ask user for update permission
+ask_update_permission() {
+    echo
+    print_update "┌─────────────────────────────────────────────────────────────┐"
+    print_update "│                    UPDATE AVAILABLE                        │"
+    print_update "│                                                             │"
+    print_update "│ A newer version of r3cond0g is available on the repository │"
+    print_update "│ Would you like to download and install the update?         │"
+    print_update "└─────────────────────────────────────────────────────────────┘"
+    echo
+    
+    while true; do
+        echo -n -e "${CYAN}[UPDATE]${NC} Install update? (y/n): "
+        read -r response
+        case $response in
+            [Yy]* ) return 0;;  # User wants to update
+            [Nn]* ) return 1;;  # User declined update
+            * ) echo "Please answer yes (y) or no (n).";;
+        esac
+    done
+}
+
+# Function to perform the update
+perform_update() {
+    print_status "Starting update process..."
+    
+    # Create a temporary directory for the update
+    local temp_dir=$(mktemp -d)
+    local current_dir=$(pwd)
+    
+    # Backup current version
+    print_status "Creating backup of current version..."
+    cp -r . "${temp_dir}/backup" 2>/dev/null || true
+    
+    # Store the script name for later execution
+    local script_name=$(basename "$0")
+    
+    # Update the repository
+    print_status "Downloading latest version..."
+    if git pull origin main 2>/dev/null || git pull origin master 2>/dev/null; then
+        print_success "Update downloaded successfully"
+        
+        # Make sure the runner script is executable
+        chmod +x "$script_name" 2>/dev/null || true
+        
+        print_success "Update completed successfully!"
+        print_status "Restarting with updated version..."
+        
+        # Clean up temp directory
+        rm -rf "$temp_dir" 2>/dev/null || true
+        
+        echo "════════════════════════════════════════════════════════════════"
+        echo
+        
+        # Restart the script with the same arguments
+        exec "./$script_name" "$@"
+        
+    else
+        print_error "Update failed. Restoring backup..."
+        
+        # Restore from backup if update failed
+        if [ -d "${temp_dir}/backup" ]; then
+            rm -rf ./* 2>/dev/null || true
+            cp -r "${temp_dir}/backup"/* . 2>/dev/null || true
+            chmod +x "$script_name" 2>/dev/null || true
+            print_success "Backup restored"
+        fi
+        
+        # Clean up temp directory
+        rm -rf "$temp_dir" 2>/dev/null || true
+        
+        print_error "Update failed. Continuing with current version..."
+        return 1
+    fi
+}
+
+# Function to handle the update process
+handle_updates() {
+    # Only check for updates if enough time has passed or forced
+    if should_check_updates || [ "$1" = "--force-update-check" ]; then
+        print_status "Checking for updates from repository..."
+        
+        if check_for_updates; then
+            if ask_update_permission; then
+                perform_update "$@"
+                # If we reach this point, the update failed
+                return 1
+            else
+                print_status "Update declined by user. Continuing with current version..."
+            fi
+        fi
+    else
+        print_status "Skipping update check (checked recently)"
+    fi
+    
+    return 0
 }
 
 # Function to initialize Go module if needed
@@ -147,18 +374,49 @@ needs_recompilation() {
     return 1  # Binary is up to date
 }
 
-# Function to update README.md
-update_readme() {
-    if [ -f "README.md" ]; then
-        # Backup existing README
-        cp README.md README.md.bak 2>/dev/null || true
-    fi
-    
+# Function to show help information
+show_help() {
+    echo "r3cond0g Runner Script v0.2"
+    echo
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Options:"
+    echo "  --force-update-check    Force check for updates regardless of time interval"
+    echo "  --skip-update-check     Skip update check entirely"
+    echo "  --help                  Show this help message"
+    echo
+    echo "The script will automatically:"
+    echo "  1. Check for updates from the Git repository (if enabled)"
+    echo "  2. Install required dependencies (Go, Git)"
+    echo "  3. Compile the latest version of r3cond0g"
+    echo "  4. Launch the tool"
+    echo
+}
+
 # Main execution flow
 main() {
+    # Handle command line arguments
+    local skip_updates=false
+    local force_updates=false
+    
+    for arg in "$@"; do
+        case $arg in
+            --help)
+                show_help
+                exit 0
+                ;;
+            --skip-update-check)
+                skip_updates=true
+                ;;
+            --force-update-check)
+                force_updates=true
+                ;;
+        esac
+    done
+    
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║         r3cond0g Runner v0.1 by 0xb0rn3 | 0xbv1             ║"
-    echo "║             Setup Environment setup script!                 ║"
+    echo "║               Enhanced Environment Setup                    ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo
 
@@ -168,23 +426,37 @@ main() {
         exit 1
     fi
 
-    # Step 1: Check Go installation
+    # Step 1: Check Git installation (needed for updates)
+    check_git
+
+    # Step 2: Handle updates (unless explicitly skipped)
+    if [ "$skip_updates" = false ]; then
+        if [ "$force_updates" = true ]; then
+            handle_updates --force-update-check "$@"
+        else
+            handle_updates "$@"
+        fi
+    else
+        print_status "Skipping update check as requested"
+    fi
+
+    # Step 3: Check Go installation 
     check_golang
 
-    # Step 2: Initialize Go module
+    # Step 4: Initialize Go module
     init_go_module
 
-    # Step 3: Install dependencies
+    # Step 5: Install dependencies
     install_dependencies
 
-    # Step 4: Check if compilation is needed
+    # Step 6: Check if compilation is needed
     if needs_recompilation; then
         compile_binary
     else
         print_success "Binary is up to date"
     fi
 
-    # Step 5: Execute the tool
+    # Step 7: Execute the tool
     echo
     print_success "Setup complete! Launching r3cond0g..."
     echo "════════════════════════════════════════════════════════════════"
@@ -194,5 +466,5 @@ main() {
     ./r3cond0g
 }
 
-# Run main function
+# Run main function with all arguments
 main "$@"
