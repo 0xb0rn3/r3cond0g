@@ -12,8 +12,9 @@ git clone https://github.com/0xb0rn3/r3cond0g
 Change directory
 ```bash
 cd r3cond0g
-
-# Make the runner executable and run
+```
+Make the runner executable and run
+```bash
 chmod +x run && ./run
 ```
 
