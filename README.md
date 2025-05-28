@@ -5,8 +5,14 @@
 A powerful, multi-threaded network reconnaissance tool written in Go with advanced features including vulnerability mapping, topology generation, and Nmap integration.
 
 ## 🚀 Quick Start
-
+Clone repo 
 ```bash
+git clone https://github.com/0xb0rn3/r3cond0g
+```
+Change directory
+```bash
+cd r3cond0g
+
 # Make the runner executable and run
 chmod +x run && ./run
 ```
@@ -46,7 +52,7 @@ If you prefer manual setup:
 # macOS: brew install go
 
 # Clone and build
-git clone <repository-url>
+git clone https://github.com/0xb0rn3/r3cond0g
 cd r3cond0g
 go mod init r3cond0g
 go mod tidy
