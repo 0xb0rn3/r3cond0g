@@ -338,6 +338,7 @@ install_dependencies() {
     print_status "Installing Go dependencies..."
     
     # Add required dependencies to go.mod
+    go get golang.org/x/time/rate 2>/dev/null || true
     go get github.com/google/gopacket 2>/dev/null || true
     go get github.com/google/gopacket/pcap 2>/dev/null || true
     go get github.com/google/gopacket/layers 2>/dev/null || true
