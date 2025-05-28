@@ -155,6 +155,6 @@ This tool is for educational and authorized security testing purposes only. User
 ```
 ---
 ```bash
-**Version:** 0.2.0  
-**Platform:** Cross-platform (Linux, macOS, Windows)
+Version: 0.2.0  
+Platform: Cross-platform (Linux, macOS, Windows)
 ```
