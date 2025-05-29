@@ -3,7 +3,7 @@
 
 <div align="center">
   
-[![Version](https://img.shields.io/badge/Version-0.2.2-red.svg?style=for-the-badge&logo=github)](https://github.com/0xb0rn3/r3cond0g)
+[![Version](https://img.shields.io/badge/Version-0.2.3-red.svg?style=for-the-badge&logo=github)](https://github.com/0xb0rn3/r3cond0g)
 [![Go Version](https://img.shields.io/badge/Go-1.18+-00ADD8.svg?style=for-the-badge&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/0xb0rn3/r3cond0g/go.yml?branch=main&style=for-the-badge&logo=github-actions)](https://github.com/0xb0rn3/r3cond0g/actions)
@@ -18,13 +18,13 @@
 
 ---
 
-## 🎯 **What is RECONRAPTOR?**
+## 🎯 **What is r3cond0g?**
 
-RECONRAPTOR is a cutting-edge network reconnaissance framework built in Go that combines speed, precision, and intelligence. Unlike traditional scanning tools, RECONRAPTOR integrates advanced vulnerability mapping, network topology generation, and multi-format reporting into a single, powerful platform designed for security professionals who demand both performance and comprehensive results.
+r3cond0g is a cutting-edge network reconnaissance framework built in Go that combines speed, precision, and intelligence. Unlike traditional scanning tools, r3cond0g integrates advanced vulnerability mapping, network topology generation, and multi-format reporting into a single, powerful platform designed for security professionals who demand both performance and comprehensive results.
 
-### 🔥 **Why Choose RECONRAPTOR?**
+### 🔥 **Why Choose r3cond0g?**
 
-Modern networks require modern tools. RECONRAPTOR addresses the limitations of legacy scanners by providing a unified platform that not only discovers services but intelligently maps vulnerabilities and generates actionable intelligence for security assessments.
+Modern networks require modern tools. r3cond0gaddresses the limitations of legacy scanners by providing a unified platform that not only discovers services but intelligently maps vulnerabilities and generates actionable intelligence for security assessments.
 
 ---
 
@@ -69,7 +69,7 @@ Modern networks require modern tools. RECONRAPTOR addresses the limitations of l
 
 ## 🎯 **Target Flexibility**
 
-RECONRAPTOR adapts to your reconnaissance needs with comprehensive targeting options:
+r3cond0g adapts to your reconnaissance needs with comprehensive targeting options:
 
 **Single Host Scanning**: `./r3cond0g -target 192.168.1.1`
 
