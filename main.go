@@ -2,7 +2,7 @@ package main
 
 import (
 	"bufio"
-	"bytes" // For ARP command output
+	"bytes" // For ARP command output if its stdout is directly used with bytes.Buffer (or for other byte manipulations)
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -289,56 +289,66 @@ var (
 	nvdCache     = sync.Map{}
 	customCVEs   = make(map[string][]string)
 	httpClient   = &http.Client{Timeout: 10 * time.Second}
-	limiter      = rate.NewLimiter(rate.Every(30*time.Second/5), 5)
+	limiter      = rate.NewLimiter(rate.Every(30*time.Second/5), 5) // Default: 5 requests per 30 seconds
 	serviceToCPE = map[string]struct{ Vendor, Product string }{
 		"http":          {"apache", "httpd"}, "https": {"apache", "httpd"}, "ssh": {"openssh", "openssh"},
 		"ftp":           {"proftpd", "proftpd"}, "mysql": {"oracle", "mysql"}, "dns": {"isc", "bind"},
 		"smtp":          {"postfix", "postfix"}, "redis": {"redis", "redis"}, "rdp": {"microsoft", "remote_desktop_services"},
 		"ms-wbt-server": {"microsoft", "remote_desktop_services"}, "microsoft-ds": {"microsoft", "windows"},
 		"netbios-ssn":   {"microsoft", "windows"}, "winrm": {"microsoft", "windows_remote_management"},
-		"snmp":          {"net-snmp", "net-snmp"},
+		"snmp":          {"net-snmp", "net-snmp"}, // Generic for SNMP, can be refined in guessOS
 	}
 )
 
 func main() {
 	printBanner()
 	loadConfigFromEnv()
-	parseCommandLineFlags()
+	parseCommandLineFlags() // This will parse flags and potentially set some config values
 	loadCustomCVEs()
 
-	// Direct Action Logic
+	// Determine if the tool should run directly (non-interactive)
 	runDirectly := false
+	// Scenario 1: Target and PortRange provided for a scan
 	if (config.TargetHost != "" || config.TargetFile != "") && config.PortRange != "" {
+		// This is a scan, unless NmapResultsFile is ALSO specified AND it's the ONLY target indication
 		if config.NmapResultsFile == "" || (config.NmapResultsFile != "" && (config.TargetHost != "" || config.TargetFile != "")) {
-			runDirectly = true // Scan action
+			runDirectly = true
 		}
-	} else if config.NmapResultsFile != "" && !(config.TargetHost != "" || config.TargetFile != "") {
-		runDirectly = true // Nmap parse action
 	}
+	// Scenario 2: Only NmapResultsFile provided for parsing
+	if config.NmapResultsFile != "" && !(config.TargetHost != "" || config.TargetFile != "") {
+		runDirectly = true
+	}
+	// Scenario 3: Any other flag that implies direct action (e.g., --help, although that exits earlier)
+	// A simple way to check if *any* flag was set by the user is flag.NFlag() after parseCommandLineFlags.
+	// However, parseCommandLineFlags() is already called.
+	// We refine `isAnyFlagSetBesidesHelp` for better clarity in direct run decision.
 
-	if runDirectly || isAnyFlagSetBesidesHelp() { // If specific action flags are set
+	if runDirectly || isAnyFlagSetBesidesHelpAndDefaults() {
 		if (config.TargetHost != "" || config.TargetFile != "") && config.PortRange != "" {
-			// Scan action
+			// Direct Scan Action
 			fmt.Println("ℹ️  Target and ports provided, attempting direct scan...")
 			if validateConfig() {
-				results = runUltraFastScan()
+				results = runUltraFastScan() // This function populates the global 'results'
 				if config.VulnMapping && len(results) > 0 { performVulnerabilityMapping() }
 				if config.TopologyMapping && len(results) > 0 { generateTopologyMap() }
 				if len(results) > 0 { displayResults(); saveResults()
 				} else { fmt.Println("ℹ️  Direct scan completed. No open ports matching criteria found on live hosts.") }
 			} else { fmt.Println("❌ Direct scan aborted due to invalid configuration.") }
 		} else if config.NmapResultsFile != "" {
-			// Nmap parse action
+			// Direct Nmap Parse Action
 			fmt.Printf("ℹ️  Nmap results file '%s' provided, attempting direct parse...\n", config.NmapResultsFile)
 			parseNmapResults()
 			if len(results) > 0 {
 				saveResults()
-				if config.VulnMapping { // Automatically try vuln mapping if enabled
+				if config.VulnMapping {
 					fmt.Println("ℹ️  Attempting vulnerability mapping on parsed Nmap results...")
 					performVulnerabilityMapping()
 				}
 			}
 		}
+		// If only other flags were set (like --output without targets), it might not do much here,
+		// but the user explicitly provided flags, so we assume non-interactive.
 		fmt.Println("👋 Exiting ReconRaptor v" + VERSION)
 		return
 	}
@@ -364,19 +374,25 @@ func main() {
 	}
 }
 
-func isAnyFlagSetBesidesHelp() bool {
-    anySet := false
-    flag.Visit(func(f *flag.Flag) {
-		// This logic is a bit tricky because some flags might have default values that match "set"
-		// A more robust way is to see if os.Args contains flags beyond the program name.
-		// For now, a simple check if any known action-driving flag was explicitly set.
-		// This is a simplified check. `flag.NFlag()` could also be used after `flag.Parse()`.
+// isAnyFlagSetBesidesHelpAndDefaults checks if user-provided flags indicate a direct action.
+func isAnyFlagSetBesidesHelpAndDefaults() bool {
+    if flag.NFlag() == 0 { // No flags set by user
+        return false
+    }
+    // If flags were set, check if they are more than just -h or -help
+    // This is a bit simplistic as other flags might have been set to their default values by user.
+    // A more robust check would compare current config to pristine default config.
+    // For now, if NFlag > 0, assume user intended some direct action unless it's just help.
+    helpSet := false
+    flag.Visit(func(f *flag.Flag){
+        if f.Name == "h" || f.Name == "help" {
+            helpSet = true
+        }
     })
-	// A simpler check: if number of actual arguments passed to flag.Parse() is > 0
-	if flag.NFlag() > 0 {
-		return true
-	}
-    return anySet
+    if flag.NFlag() == 1 && helpSet {
+        return false // Only help was explicitly set
+    }
+    return flag.NFlag() > 0
 }
 
 
@@ -497,31 +513,20 @@ func AttemptToGetMACAddress(ipAddr string, timeout time.Duration) string {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Try to "ping" or connect to the host to populate ARP cache if necessary.
-	// This is a heuristic. A proper ARP implementation sends ARP requests.
-	// For this shell-out version, we rely on the OS's ARP cache or `arp` command behavior.
-	// A very quick TCP dial attempt might help populate it on some OSes if not already there.
+	// Heuristic: Try a quick TCP dial to potentially populate the ARP cache.
 	quickDialTimeout := 50 * time.Millisecond
-	if timeout < quickDialTimeout { quickDialTimeout = timeout / 2}
-	conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, "80"), quickDialTimeout) // Check a common port
-	if dialErr == nil {
-		conn.Close()
-	} // We don't care about the error here, just an attempt to interact.
+	if timeout < quickDialTimeout { quickDialTimeout = timeout / 2; if quickDialTimeout < 10*time.Millisecond { quickDialTimeout = 10*time.Millisecond } }
+	tempConn, _ := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, "80"), quickDialTimeout)
+	if tempConn != nil { tempConn.Close() }
 
 	switch runtime.GOOS {
-	case "linux", "darwin":
-		cmd = exec.CommandContext(ctx, "arp", "-n", ipAddr)
-	case "windows":
-		cmd = exec.CommandContext(ctx, "arp", "-a", ipAddr)
-	default:
-		return "" // Unsupported OS for this method
+	case "linux", "darwin": cmd = exec.CommandContext(ctx, "arp", "-n", ipAddr)
+	case "windows": cmd = exec.CommandContext(ctx, "arp", "-a", ipAddr)
+	default: return ""
 	}
 
 	arpOutput, err = cmd.Output()
-	if err != nil {
-		// fmt.Printf("Debug: ARP command for %s failed: %v\n", ipAddr, err)
-		return ""
-	}
+	if err != nil { return "" }
 
 	outputStr := string(arpOutput)
 	lines := strings.Split(outputStr, "\n")
@@ -529,14 +534,9 @@ func AttemptToGetMACAddress(ipAddr string, timeout time.Duration) string {
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// Ensure the line pertains to the IP address we're looking for
-		// This check might need to be more robust depending on `arp` output variations
 		if strings.Contains(line, ipAddr) || (runtime.GOOS == "linux" && strings.Contains(line, fmt.Sprintf("(%s)", ipAddr))) {
 			match := macRegex.FindString(line)
-			if match != "" {
-				normalizedMac := strings.ReplaceAll(match, "-", ":")
-				return strings.ToUpper(normalizedMac)
-			}
+			if match != "" { normalizedMac := strings.ReplaceAll(match, "-", ":"); return strings.ToUpper(normalizedMac) }
 		}
 	}
 	return ""
@@ -590,20 +590,9 @@ func parseSingleTarget(target string) []string {
 		var ips []string
 		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) { ips = append(ips, ip.String()); if len(ips) >= 131072 { fmt.Printf("⚠️  CIDR %s too large, limiting to %d IPs.\n", target, len(ips)); break } }
 		ones, bits := ipnet.Mask.Size()
-		// Remove network and broadcast for common IPv4 subnets (not /31 or /32)
-		if bits == 32 && ones > 0 && ones < 31 && len(ips) >= 2 { // Check len(ips) >=2 to ensure there's something to remove
-			// Check if the first IP is the network address
-			if ips[0] == ipnet.IP.Mask(ipnet.Mask).String() {
-				ips = ips[1:]
-			}
-			// Check if the last IP (if list is still not empty) is the broadcast address
-			if len(ips) > 0 {
-				broadcastIP := make(net.IP, len(ipnet.IP))
-				for i := range ipnet.IP { broadcastIP[i] = ipnet.IP[i] | ^ipnet.Mask[i] }
-				if ips[len(ips)-1] == broadcastIP.String() {
-					ips = ips[:len(ips)-1]
-				}
-			}
+		if bits == 32 && ones > 0 && ones < 31 && len(ips) >= 2 {
+			if ips[0] == ipnet.IP.Mask(ipnet.Mask).String() { ips = ips[1:] }
+			if len(ips) > 0 { broadcastIP := make(net.IP, len(ipnet.IP)); for i := range ipnet.IP { broadcastIP[i] = ipnet.IP[i] | ^ipnet.Mask[i] }; if ips[len(ips)-1] == broadcastIP.String() { ips = ips[:len(ips)-1] } }
 		}
 		return ips
 	}
@@ -614,42 +603,18 @@ func parseSingleTarget(target string) []string {
 func incIP(ip net.IP) { for j := len(ip) - 1; j >= 0; j-- { ip[j]++; if ip[j] > 0 { break } } }
 
 func isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
-	if len(ports) == 0 { return true } // If no ping ports, assume alive for scan
-	var wgHostPing sync.WaitGroup
-	aliveChan := make(chan bool, 1) // Buffered channel to signal first success
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Cancel all ongoing dials if one succeeds or all fail
-
+	if len(ports) == 0 { return true }
+	var wgHostPing sync.WaitGroup; aliveChan := make(chan bool, 1)
+	ctx, cancel := context.WithCancel(context.Background()); defer cancel()
 	for _, port := range ports {
 		wgHostPing.Add(1)
 		go func(p int) {
-			defer wgHostPing.Done()
-			dialCtx, dialCancel := context.WithTimeout(ctx, timeout) // Use overall context + per-dial timeout
-			defer dialCancel()
-			
-			dialer := net.Dialer{}
-			conn, err := dialer.DialContext(dialCtx, "tcp", fmt.Sprintf("%s:%d", host, p))
-			if err == nil {
-				conn.Close()
-				select {
-				case aliveChan <- true: // Signal success
-				default: // Already signaled
-				}
-				cancel() // Cancel other pending dials for this host
-			}
+			defer wgHostPing.Done(); dialCtx, dialCancel := context.WithTimeout(ctx, timeout); defer dialCancel()
+			dialer := net.Dialer{}; conn, err := dialer.DialContext(dialCtx, "tcp", fmt.Sprintf("%s:%d", host, p))
+			if err == nil { conn.Close(); select { case aliveChan<-true:; default:}; cancel() }
 		}(port)
 	}
-
-	// Wait for either a success signal or all goroutines to finish
-	go func() {
-		wgHostPing.Wait()
-		select {
-		case aliveChan <- false: // All finished without success
-		default: // Success already signaled
-		}
-	}()
-	
+	go func() { wgHostPing.Wait(); select { case aliveChan<-false:; default:} }()
 	return <-aliveChan
 }
 
@@ -689,7 +654,7 @@ func scanUDPPort(host string, port int) *EnhancedScanResult {
 		if port == 161 { 
 			result.Service = "snmp"; 
             snmpPayload := string(buffer[:n])
-            re := regexp.MustCompile(`(?i)(Linux|Windows|Cisco|Juniper|JUNOS|IOS|FortiOS|PAN-OS)[\s\/\-\_A-Za-z0-9\.\(\)]*`)
+            re := regexp.MustCompile(`(?i)(Linux|Windows|Cisco|Juniper|JUNOS|IOS|FortiOS|PAN-OS|ESXi|MikroTik|RouterOS)[\s\/\-\_A-Za-z0-9\.\(\)]*`)
             matches := re.FindAllString(snmpPayload, -1)
             if len(matches) > 0 { bestMatch := ""; for _, m := range matches { if len(m) > len(bestMatch) { bestMatch = m } }; result.Version = truncateString(strings.TrimSpace(bestMatch), 100)
             } else { rePrintable := regexp.MustCompile(`[[:print:]]{10,}`); printableMatches := rePrintable.FindAllString(snmpPayload, -1); if len(printableMatches) > 0 { result.Version = truncateString(strings.TrimSpace(printableMatches[0]), 100) } }
@@ -719,12 +684,12 @@ func (p *HTTPProbe) Detect(conn net.Conn) (string, string) {
 }
 
 func detectServiceWithTimeout(conn net.Conn, port int, protocol string, timeout time.Duration) (string, string) {
-	defaultServices := map[int]string{ 21:"ftp", 22:"ssh", 23:"telnet", 25:"smtp", 53:"dns", 80:"http", 110:"pop3", 139:"netbios-ssn", 143:"imap", 161:"snmp", 389:"ldap", 443:"https", 445:"microsoft-ds", 3306:"mysql", 3389:"ms-wbt-server", 5432:"postgresql", 5900:"vnc", 8080:"http-proxy" }
+	defaultServices := map[int]string{ 21:"ftp", 22:"ssh", 23:"telnet", 25:"smtp", 53:"dns", 67:"dhcp",68:"dhcp",69:"tftp", 80:"http", 110:"pop3", 111:"rpcbind", 123:"ntp",135:"msrpc",137:"netbios-ns",138:"netbios-dgm",139:"netbios-ssn", 143:"imap", 161:"snmp", 162:"snmptrap", 389:"ldap", 443:"https", 445:"microsoft-ds", 465:"smtps",514:"syslog",587:"submission",636:"ldaps",993:"imaps",995:"pop3s",1080:"socks",1433:"mssql",1521:"oracle",1723:"pptp",2049:"nfs",3000:"http-alt",3268:"globalcatLDAP",3269:"globalcatLDAPssl",3306:"mysql", 3389:"ms-wbt-server", 5060:"sip",5061:"sips",5222:"xmpp-client",5353:"mdns",5432:"postgresql", 5900:"vnc",5985:"winrm",5986:"winrm-ssl",6379:"redis",8000:"http-alt",8080:"http-proxy", 8443:"https-alt", 27017:"mongodb", }
 	detectedService, defaultExists := defaultServices[port]; if !defaultExists { detectedService = "unknown" }; detectedVersion := "unknown"
 	if protocol == "tcp" && conn != nil {
 		conn.SetDeadline(time.Now().Add(timeout)); defer conn.SetDeadline(time.Time{})
 		if probe, exists := enhancedProbes[port]; exists { conn.SetWriteDeadline(time.Now().Add(timeout/2)); if _, err := conn.Write(probe.Probe); err == nil { buffer := make([]byte, 4096); conn.SetReadDeadline(time.Now().Add(timeout/2)); if n, errRead := conn.Read(buffer); errRead == nil && n > 0 { return probe.Matcher(buffer[:n]) } } }
-		isHTTPPort := (port==80 || port==8080 || port==8000); isHTTPSPort := (port==443 || port==8443)
+		isHTTPPort := (port==80 || port==8080 || port==8000 || port==3000); isHTTPSPort := (port==443 || port==8443)
 		if isHTTPPort { return (&HTTPProbe{}).Detect(conn) }; if isHTTPSPort && detectedService == "https" { return "https", "requires TLS" }
 	} else if protocol == "udp" { return detectedService, "unknown (UDP)" }
 	return detectedService, detectedVersion
@@ -741,62 +706,64 @@ func getUDPProbe(port int) []byte {
 func isCommonUDPPort(port int) bool { common := []int{53,67,68,69,123,137,138,161,162,500,514,1900,4500,5353}; for _,p:=range common {if p==port{return true}}; return false }
 
 func guessOS(result *EnhancedScanResult) string {
+	currentGuess := result.OSGuess // Preserve existing guess if any, try to refine it
+	if currentGuess == "" { currentGuess = "Unknown" }
+
 	serviceLower := strings.ToLower(result.Service); versionLower := strings.ToLower(result.Version)
 	macVendorLower := strings.ToLower(result.MACVendor)
 
 	// MAC Vendor based hints (often very strong)
 	if macVendorLower != "" && macVendorLower != "unknown vendor" {
-		if strings.Contains(macVendorLower, "vmware") { return "Virtual Machine (VMware)" }
-		if strings.Contains(macVendorLower, "oracle") && (strings.Contains(macVendorLower, "virtualbox") || result.Service == "virtualbox") { return "Virtual Machine (VirtualBox)"}
-		if strings.Contains(macVendorLower, "microsoft") && (result.OSGuess == "" || result.OSGuess == "Unknown" || result.OSGuess == "Windows (Port Hint)") { /* Strengthens Windows guess but don't override specific windows version if known */ }
-		if strings.Contains(macVendorLower, "apple") { return "Apple Device (macOS/iOS)" }
-		if strings.Contains(macVendorLower, "raspberry pi") { return "Linux (Raspberry Pi)" }
-		if strings.Contains(macVendorLower, "cisco") { return "Network Device (Cisco)" }
-		if strings.Contains(macVendorLower, "juniper") { return "Network Device (Juniper)" }
-		if strings.Contains(macVendorLower, "arista") { return "Network Device (Arista)" }
-		if strings.Contains(macVendorLower, "dell") && (result.OSGuess == "" || result.OSGuess == "Unknown" || result.OSGuess == "Windows (Port Hint)") { /* Dell Hardware */ }
-		if strings.Contains(macVendorLower, "hewlett packard") || strings.Contains(macVendorLower, "hp enterprise") { /* HP Hardware */ }
-		// If a strong MAC Vendor hint is found, we can often return it, or use it to refine service-based guesses.
+		if strings.Contains(macVendorLower, "vmware") { return "Virtual Machine (VMware)" } // Strong indicator
+		if strings.Contains(macVendorLower, "oracle") && (strings.Contains(macVendorLower, "virtualbox") || result.Service == "virtualbox") { return "Virtual Machine (VirtualBox)"} // Strong indicator
+		if strings.Contains(macVendorLower, "microsoft corporation") && (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)" || currentGuess == "Dell Hardware" || currentGuess == "HP Hardware" ) { /* Microsoft NIC, likely Windows, good supplemental */ currentGuess = "Windows (Microsoft NIC)"}
+		if strings.Contains(macVendorLower, "apple") { return "Apple Device (macOS/iOS)" } // Strong indicator
+		if strings.Contains(macVendorLower, "raspberry pi") { return "Linux (Raspberry Pi)" } // Strong indicator
+		if strings.Contains(macVendorLower, "cisco") { currentGuess = "Network Device (Cisco)" }
+		if strings.Contains(macVendorLower, "juniper") { currentGuess = "Network Device (Juniper)" }
+		if strings.Contains(macVendorLower, "arista") { currentGuess = "Network Device (Arista)" }
+		if strings.Contains(macVendorLower, "dell") && (currentGuess == "Unknown" || strings.HasPrefix(currentGuess, "Windows (Port Hint)")) { currentGuess = "Dell Hardware" }
+		if strings.Contains(macVendorLower, "hewlett packard") || strings.Contains(macVendorLower, "hp enterprise") { currentGuess = "HP Hardware" }
 	}
 	
 	if serviceLower == "snmp" && versionLower != "unknown" && versionLower != "" {
 		vl := strings.ToLower(versionLower)
-		if strings.Contains(vl, "windows") || strings.Contains(vl, "microsoft") { return "Windows (SNMP)"}
+		if strings.Contains(vl, "windows") || strings.Contains(vl, "microsoft") { return "Windows (SNMP)"} // More specific than general "Windows"
 		if strings.Contains(vl, "linux") { return "Linux (SNMP)" }
 		if strings.Contains(vl, "cisco ios") || strings.Contains(vl, "cisco adaptive security appliance") || strings.Contains(vl, "cisco nx-os") { return "Cisco IOS/ASA/NX-OS (SNMP)" }
 		if strings.Contains(vl, "junos") || strings.Contains(vl, "juniper") { return "Juniper JUNOS (SNMP)" }
 		if strings.Contains(vl, "fortios") || strings.Contains(vl, "fortigate") { return "Fortinet FortiOS (SNMP)"}
 		if strings.Contains(vl, "pan-os") { return "Palo Alto PAN-OS (SNMP)"}
 		if strings.Contains(vl, "routeros") || strings.Contains(vl, "mikrotik") { return "MikroTik RouterOS (SNMP)"}
-		if strings.Contains(vl, "esxi") || strings.Contains(vl, "vmware") {return "VMware ESXi (SNMP)"}
-		// If SNMP info is descriptive but not caught by specific rules, it could still be better than "Unknown"
-		if len(vl) > 5 && (result.OSGuess == "" || result.OSGuess == "Unknown" || result.OSGuess == "Windows (Port Hint)") { return "Device (SNMP: " + truncateString(result.Version, 20) + ")" }
+		if strings.Contains(vl, "esxi") || strings.Contains(vl, "vmware esxi") {return "VMware ESXi (SNMP)"}
+		// If SNMP info is descriptive and OS not strongly identified by MAC, use SNMP derived info
+		if len(vl) > 5 && (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)" || strings.HasPrefix(currentGuess, "Device (") || strings.HasSuffix(currentGuess, "Hardware")) { currentGuess = "Device (SNMP: " + truncateString(result.Version, 20) + ")" }
 	}
 	if strings.Contains(serviceLower, "http") {
-		if strings.Contains(versionLower, "iis") || strings.Contains(versionLower, "microsoft-httpapi") { return "Windows" }
-		if strings.Contains(versionLower, "apache") { if strings.Contains(versionLower, "win32")||strings.Contains(versionLower,"win64"){return "Windows"}; return "Linux/Unix (Apache)" }
-		if strings.Contains(versionLower, "nginx") { return "Linux/Unix (Nginx)" }
+		if strings.Contains(versionLower, "iis") || strings.Contains(versionLower, "microsoft-httpapi") { currentGuess = "Windows (IIS)" }
+		else if strings.Contains(versionLower, "apache") { if strings.Contains(versionLower, "win32")||strings.Contains(versionLower,"win64"){currentGuess = "Windows (Apache)"} else if (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)") {currentGuess = "Linux/Unix (Apache)"}}
+		else if strings.Contains(versionLower, "nginx") && (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)") { currentGuess = "Linux/Unix (Nginx)" }
 	}
 	if strings.Contains(serviceLower, "ssh") {
 		if strings.Contains(versionLower, "openssh") {
-			if strings.Contains(versionLower, "windows") { return "Windows (OpenSSH)"}
-			return "Linux/Unix (OpenSSH)"
-		}
-		if strings.Contains(versionLower, "dropbear") { return "Linux/Embedded (Dropbear)" }
+			if strings.Contains(versionLower, "windows") { currentGuess = "Windows (OpenSSH)"}
+			else if (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)" || strings.HasPrefix(currentGuess, "Device (") || strings.HasSuffix(currentGuess, "Hardware")) {currentGuess = "Linux/Unix (OpenSSH)"}
+		} else if strings.Contains(versionLower, "dropbear") { currentGuess = "Linux/Embedded (Dropbear)" }
 	}
-	if serviceLower == "ms-wbt-server" || serviceLower == "rdp" { return "Windows" }
-	if serviceLower == "microsoft-ds" || serviceLower == "netbios-ssn" { return "Windows" }
-	if serviceLower == "winrm" || strings.Contains(serviceLower, "ws-management") { return "Windows" }
-	switch result.Port { case 135,139,445,3389,5985,5986: if result.OSGuess==""||result.OSGuess=="Unknown"{return "Windows (Port Hint)"} }
+	if serviceLower == "ms-wbt-server" || serviceLower == "rdp" { currentGuess = "Windows (RDP)" }
+	if serviceLower == "microsoft-ds" || serviceLower == "netbios-ssn" { if (currentGuess == "Unknown" || currentGuess == "Windows (Port Hint)" || strings.HasPrefix(currentGuess, "Device (") || strings.HasSuffix(currentGuess, "Hardware")) {currentGuess = "Windows (SMB)"} }
+	if serviceLower == "winrm" || strings.Contains(serviceLower, "ws-management") { currentGuess = "Windows (WinRM)" }
 	
-	// Fallback if OSGuess is still empty but MAC vendor gave a clue
-	if result.OSGuess == "" || result.OSGuess == "Unknown" {
-		if macVendorLower != "" && macVendorLower != "unknown vendor" {
-			return "Device (" + result.MACVendor + ")"
+	if currentGuess == "Unknown" { // Only apply port hints if nothing else matched
+		switch result.Port { case 135,139,445,3389,5985,5986: currentGuess = "Windows (Port Hint)" }
+	} else if currentGuess == "Dell Hardware" || currentGuess == "HP Hardware" || currentGuess == "Windows (Microsoft NIC)" {
+		// If MAC suggests hardware vendor but services imply Windows, refine to just "Windows"
+		isWindowsService := serviceLower == "ms-wbt-server" || serviceLower == "rdp" || serviceLower == "microsoft-ds" || serviceLower == "netbios-ssn" || serviceLower == "winrm"
+		if isWindowsService {
+			currentGuess = "Windows"
 		}
 	}
-	if result.OSGuess != "" && result.OSGuess != "Unknown" { return result.OSGuess } // Keep prior more specific guess if any
-	return "Unknown"
+	return currentGuess
 }
 
 func queryNVD(cpe string) ([]string, error) {
@@ -810,7 +777,6 @@ func queryNVD(cpe string) ([]string, error) {
 		if currentRateLimit < 1 { limiter.SetLimit(rate.Every(30*time.Second/50)); limiter.SetBurst(50) }
 	} else {
 		if currentRateLimit > (rate.Every(30*time.Second/5)+0.01) { limiter.SetLimit(rate.Every(30*time.Second/5)); limiter.SetBurst(5) }
-		// fmt.Println("⚠️  No NVD API key. Rate limited.") // Reduce noise, user is warned once.
 	}
 	var cves []string; maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -882,9 +848,27 @@ func runUltraFastScan() []EnhancedScanResult {
 	return results
 }
 
+func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
+	defer wg.Done(); defer func() { if r:=recover();r!=nil{displayMutex.Lock();fmt.Printf("\n❌ Panic @ %s:%d: %v\n",host,port,r);displayMutex.Unlock()}; <-sem }()
+	sem <- struct{}{}
+	if resultTCP := scanTCPPort(host, port); resultTCP != nil {
+		if config.EnableMACLookup { parsedIP:=net.ParseIP(host); if parsedIP!=nil && (parsedIP.IsPrivate()||parsedIP.IsLinkLocalUnicast()||parsedIP.IsLoopback()){ mac:=AttemptToGetMACAddress(host,250*time.Millisecond); if mac!=""{ resultTCP.MACAddress=mac; resultTCP.MACVendor=LookupMACVendor(mac); resultTCP.OSGuess = guessOS(resultTCP) /* Re-guess OS with MAC info */}}}
+		mutex.Lock(); results=append(results,*resultTCP); mutex.Unlock()
+		displayMutex.Lock(); fmt.Printf("\r\033[K✅ TCP: %s:%d (%s %s)\n",host,port,resultTCP.Service,resultTCP.Version); displayMutex.Unlock()
+	}
+	atomic.AddInt64(&scannedPorts,1)
+	if config.UDPScan {
+		if resultUDP := scanUDPPort(host, port); resultUDP != nil {
+			if config.EnableMACLookup { parsedIP:=net.ParseIP(host); if parsedIP!=nil && (parsedIP.IsPrivate()||parsedIP.IsLinkLocalUnicast()||parsedIP.IsLoopback()){ mac:=AttemptToGetMACAddress(host,250*time.Millisecond); if mac!=""{ resultUDP.MACAddress=mac; resultUDP.MACVendor=LookupMACVendor(mac); resultUDP.OSGuess = guessOS(resultUDP) /* Re-guess OS */}}}
+			mutex.Lock(); results=append(results,*resultUDP); mutex.Unlock()
+			displayMutex.Lock(); fmt.Printf("\r\033[K✅ UDP: %s:%d (%s %s)\n",host,port,resultUDP.Service,resultUDP.Version); displayMutex.Unlock()
+		}
+		atomic.AddInt64(&scannedPorts,1)
+	}
+}
 func validateConfig() bool { fmt.Println("🔧 Validating configuration..."); isValid:=true; if config.TargetHost==""&&config.TargetFile==""{fmt.Println("❌ No target.");isValid=false}; if len(parsePortRange(config.PortRange))==0&&config.NmapResultsFile==""{fmt.Println("❌ No port range.");isValid=false}; if config.TargetFile!=""{if _,err:=os.Stat(config.TargetFile);os.IsNotExist(err){fmt.Printf("❌ Target file missing: %s\n",config.TargetFile);isValid=false}}; if config.ScanTimeout<50||config.ScanTimeout>10000{fmt.Println("⚠️ Scan timeout recommend 50-10000ms.")}; if config.MaxConcurrency<1||config.MaxConcurrency>10000{fmt.Println("⚠️ Max concurrency recommend 1-10000.")}; if config.PingSweep{if len(parsePortRange(config.PingSweepPorts))==0{fmt.Println("❌ Ping sweep enabled, no ping ports.");isValid=false};if config.PingSweepTimeout<=0{fmt.Println("❌ Ping sweep enabled, invalid timeout.");isValid=false}}; if config.VulnMapping&&config.NVDAPIKey==""{fmt.Println("⚠️ Vuln mapping on, NVD API key missing.")}; if isValid{fmt.Println("✅ Config OK.")}else{fmt.Println("❌ Config validation failed.")}; return isValid }
 func debugCIDRParsing(cidr string) { fmt.Printf("🔍 Debug Parse: '%s'\n",cidr);ips:=parseSingleTarget(cidr);fmt.Printf("📊 IPs: %d\n",len(ips));dc:=len(ips);if dc>20{dc=20};for i:=0;i<dc;i++{fmt.Printf("  %d: %s\n",i+1,ips[i])};if len(ips)>20{fmt.Printf("  ... %d more\n",len(ips)-20)}}
-func parseNmapResults() { if config.NmapResultsFile==""{config.NmapResultsFile=askForString("📁 Nmap XML path: ");if config.NmapResultsFile==""{fmt.Println("❌ No Nmap file.");return}};file,err:=os.Open(config.NmapResultsFile);if err!=nil{fmt.Printf("❌ Error Nmap file '%s': %v\n",config.NmapResultsFile,err);return};defer file.Close();data,err:=io.ReadAll(file);if err!=nil{fmt.Printf("❌ Error reading Nmap file '%s': %v\n",config.NmapResultsFile,err);return};var nmapRun NmapRun;if err:=xml.Unmarshal(data,&nmapRun);err!=nil{fmt.Printf("❌ Error parsing Nmap XML '%s': %v\n",config.NmapResultsFile,err);return};newResults:=[]EnhancedScanResult{};parsedCount:=0;for _,host:=range nmapRun.Hosts{var hostIP,hostMAC,macVendor string;for _,addr:=range host.Addresses{if addr.AddrType=="ipv4"{hostIP=addr.Addr};if addr.AddrType=="ipv6"&&hostIP==""{hostIP=addr.Addr};if addr.AddrType=="mac"{hostMAC=addr.Addr;if addr.Vendor!=""{macVendor=addr.Vendor}}};if hostIP==""{continue};for _,port:=range host.Ports.Ports{isConsideredOpen:=strings.ToLower(port.State.State)=="open"||(port.Protocol=="udp"&&strings.Contains(strings.ToLower(port.State.State),"open|filtered"));if !config.OnlyOpenPorts||isConsideredOpen{result:=EnhancedScanResult{Host:hostIP,Port:port.PortID,Protocol:port.Protocol,State:port.State.State,Service:port.Service.Name,Version:strings.TrimSpace(port.Service.Version),Timestamp:time.Now().UTC()};result.OSGuess=guessOS(&result);if hostMAC!=""{result.MACAddress=strings.ToUpper(hostMAC);if macVendor!=""{result.MACVendor=macVendor}else{result.MACVendor=LookupMACVendor(result.MACAddress)}};newResults=append(newResults,result);parsedCount++}}};results=newResults;fmt.Printf("✅ Parsed %d ports from %s ('OnlyOpen': %t)\n",parsedCount,config.NmapResultsFile,config.OnlyOpenPorts);if len(results)>0{displayResults();if config.VulnMapping{if askForBool("🔍 Vuln map Nmap results? (y/N): "){performVulnerabilityMapping()}}}else{fmt.Println("ℹ️ No ports matched from Nmap file.")}}
+func parseNmapResults() { if config.NmapResultsFile==""{config.NmapResultsFile=askForString("📁 Nmap XML path: ");if config.NmapResultsFile==""{fmt.Println("❌ No Nmap file.");return}};file,err:=os.Open(config.NmapResultsFile);if err!=nil{fmt.Printf("❌ Error Nmap file '%s': %v\n",config.NmapResultsFile,err);return};defer file.Close();data,err:=io.ReadAll(file);if err!=nil{fmt.Printf("❌ Error reading Nmap file '%s': %v\n",config.NmapResultsFile,err);return};var nmapRun NmapRun;if err:=xml.Unmarshal(data,&nmapRun);err!=nil{fmt.Printf("❌ Error parsing Nmap XML '%s': %v\n",config.NmapResultsFile,err);return};newResults:=[]EnhancedScanResult{};parsedCount:=0;for _,host:=range nmapRun.Hosts{var hostIP,hostMAC,macVendor string;for _,addr:=range host.Addresses{if addr.AddrType=="ipv4"{hostIP=addr.Addr};if addr.AddrType=="ipv6"&&hostIP==""{hostIP=addr.Addr};if addr.AddrType=="mac"{hostMAC=addr.Addr;if addr.Vendor!=""{macVendor=addr.Vendor}}};if hostIP==""{continue};for _,port:=range host.Ports.Ports{isConsideredOpen:=strings.ToLower(port.State.State)=="open"||(port.Protocol=="udp"&&strings.Contains(strings.ToLower(port.State.State),"open|filtered"));if !config.OnlyOpenPorts||isConsideredOpen{result:=EnhancedScanResult{Host:hostIP,Port:port.PortID,Protocol:port.Protocol,State:port.State.State,Service:port.Service.Name,Version:strings.TrimSpace(port.Service.Version),Timestamp:time.Now().UTC()};if hostMAC!=""{result.MACAddress=strings.ToUpper(hostMAC);if macVendor!=""{result.MACVendor=macVendor}else{result.MACVendor=LookupMACVendor(result.MACAddress)}};result.OSGuess=guessOS(&result);newResults=append(newResults,result);parsedCount++}}};results=newResults;fmt.Printf("✅ Parsed %d ports from %s ('OnlyOpen': %t)\n",parsedCount,config.NmapResultsFile,config.OnlyOpenPorts);if len(results)>0{displayResults();if config.VulnMapping{if askForBool("🔍 Vuln map Nmap results? (y/N): "){performVulnerabilityMapping()}}}else{fmt.Println("ℹ️ No ports matched from Nmap file.")}}
 func mapVulnerabilities(result *EnhancedScanResult) { if !config.VulnMapping{return};serviceKey:=strings.ToLower(strings.TrimSpace(result.Service));versionKey:=strings.TrimSpace(result.Version);productKey:=fmt.Sprintf("%s %s",result.Service,result.Version);if cves,found:=customCVEs[productKey];found{result.Vulnerabilities=cves;return};lowerServiceProductKey:=fmt.Sprintf("%s %s",serviceKey,versionKey);if cves,found:=customCVEs[lowerServiceProductKey];found{result.Vulnerabilities=cves;return};if versionKey==""||versionKey=="unknown"||serviceKey=="unknown"||serviceKey==""{result.Vulnerabilities=[]string{"Version/Service unknown - NVD skip"};return};cpeInfo,cpeMapExists:=serviceToCPE[serviceKey];if !cpeMapExists{if strings.Contains(serviceKey,"apache")&&(strings.Contains(serviceKey,"httpd")||serviceKey=="http"||serviceKey=="https"){cpeInfo=struct{Vendor,Product string}{"apache","http_server"}}else if strings.Contains(serviceKey,"openssh"){cpeInfo=struct{Vendor,Product string}{"openssh","openssh"}}else if strings.Contains(serviceKey,"nginx"){cpeInfo=struct{Vendor,Product string}{"nginx","nginx"}}else if strings.Contains(serviceKey,"mysql"){cpeInfo=struct{Vendor,Product string}{"oracle","mysql"}}else{result.Vulnerabilities=[]string{fmt.Sprintf("Service '%s' not in CPE map",result.Service)};return}};cpeVersion:=versionKey;if strings.HasPrefix(strings.ToLower(versionKey),cpeInfo.Product+" "){cpeVersion=strings.TrimPrefix(strings.ToLower(versionKey),cpeInfo.Product+" ")};if idx:=strings.Index(cpeVersion," ");idx!=-1{cpeVersion=cpeVersion[:idx]};if idx:=strings.Index(cpeVersion,"(");idx!=-1{cpeVersion=cpeVersion[:idx]};cpeString:=fmt.Sprintf("cpe:2.3:a:%s:%s:%s:*:*:*:*:*:*:*",cpeInfo.Vendor,cpeInfo.Product,strings.ToLower(cpeVersion));nvdCacheKey:=cpeString;if cachedVulns,found:=nvdCache.Load(nvdCacheKey);found{if cvs,ok:=cachedVulns.([]string);ok{result.Vulnerabilities=cvs;return}};nvdCVEs,err:=queryNVD(cpeString);if err!=nil{result.Vulnerabilities=[]string{fmt.Sprintf("NVD lookup error: %s",err.Error())};nvdCache.Store(nvdCacheKey,result.Vulnerabilities);return};nvdCache.Store(nvdCacheKey,nvdCVEs);if len(nvdCVEs)>0{result.Vulnerabilities=nvdCVEs}else{fuzzyKey:=fmt.Sprintf("%s %s",result.Service,versionKey);if similar:=findSimilarKey(fuzzyKey);similar!=""{if localCVEs,found:=vulnDB[similar];found{result.Vulnerabilities=append([]string{"(Local DB Match):"},localCVEs...);return}};result.Vulnerabilities=[]string{"No known vulnerabilities found (NVD/Local)"}}}
 func performVulnerabilityMapping() { if len(results)==0{fmt.Println("❌ No results for vuln map.");return};if !config.VulnMapping{fmt.Println("ℹ️ Vuln mapping disabled.");return};if config.NVDAPIKey==""{fmt.Println("⚠️ NVD API Key missing.");if !askForBool("Continue vuln map without NVD API key? (y/N): "){return}};fmt.Println("🔍 Mapping vulnerabilities...");var mappedCountAtomic int32;var wgVuln sync.WaitGroup;vulnSemMax:=10;if config.NVDAPIKey==""{vulnSemMax=2};vulnSem:=make(chan struct{},vulnSemMax);tempResults:=make([]EnhancedScanResult,len(results));copy(tempResults,results);totalToMap:=len(tempResults);mapProgressTicker:=time.NewTicker(1*time.Second);var displayMutexMap sync.Mutex;mapDoneSignal:=make(chan bool);go func(){for{select{case <-mapProgressTicker.C:current:=atomic.LoadInt32(&mappedCountAtomic);if totalToMap==0{continue};percentage:=float64(current)/float64(totalToMap)*100;displayMutexMap.Lock();fmt.Printf("\r\033[K🔍 Vuln Mapping: %d/%d (%.1f%%)",current,totalToMap,percentage);displayMutexMap.Unlock()
 case <-mapDoneSignal:return}}}();for i:=range tempResults{wgVuln.Add(1);go func(idx int){defer wgVuln.Done();vulnSem<-struct{}{};defer func(){<-vulnSem}();mapVulnerabilities(&tempResults[idx]);atomic.AddInt32(&mappedCountAtomic,1)}(i)};wgVuln.Wait();mapDoneSignal<-true;mapProgressTicker.Stop();time.Sleep(150*time.Millisecond);mutex.Lock();results=tempResults;mutex.Unlock();finalMappedCount:=atomic.LoadInt32(&mappedCountAtomic);displayMutexMap.Lock();fmt.Printf("\r\033[K✅ Vuln mapping complete for %d results.\n",finalMappedCount);displayMutexMap.Unlock();displayResults()}
@@ -906,9 +890,6 @@ func performIPSweepAndSave() {
 	fmt.Println("📡 Starting IP Sweep Only mode...")
 	if config.TargetHost == "" && config.TargetFile == "" {
 		fmt.Println("❌ No targets configured. Please configure targets first (Menu Option 2 or CLI).")
-		// Optionally prompt for targets here if desired for pure interactive IP sweep mode
-		// config.TargetHost = askForString("🎯 Enter target host(s) for sweep (comma-separated or CIDR): ")
-		// if config.TargetHost == "" { fmt.Println("❌ No targets provided. Aborting."); return }
 		return
 	}
 
