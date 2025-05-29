@@ -241,6 +241,7 @@ needs_recompilation_check() {
         fi
     done
     return 1 # No recompilation needed
+    clear
 }
 
 compile_tool_binary() {
@@ -250,6 +251,7 @@ compile_tool_binary() {
     if go build -ldflags="-s -w" -o "$TOOL_EXECUTABLE_NAME" "$MAIN_GO_FILE"; then
         print_success "ReconRaptor compiled successfully: $TOOL_EXECUTABLE_NAME"
         chmod +x "$TOOL_EXECUTABLE_NAME"
+        clear
     else
         print_error "Compilation failed! Check Go environment and source code."
         exit 1
@@ -340,7 +342,7 @@ main_flow() {
     echo
 
     # Clear screen before launching the tool for a cleaner UI
-    # clear # Uncomment if you prefer the screen to be cleared
+     clear 
 
     # Execute the compiled binary with its specific arguments
     "./$TOOL_EXECUTABLE_NAME" "${tool_args[@]}"
