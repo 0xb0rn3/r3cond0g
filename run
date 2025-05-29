@@ -1,472 +1,352 @@
 #!/usr/bin/env bash
 
-# Automated setup, compilation, and execution with update checking
+# ReconRaptor (r3cond0g) - Enhanced Runner & Setup Script
+# Script Version: 0.2.2
+# Target Tool Version: 0.2.2 ReconRaptor
 
 set -e  # Exit on any error
 
-# Configuration - Modify these for your repository
-REPO_URL="https://github.com/0xb0rn3/r3cond0g.git"  # Replace with actual repo URL
+# --- Configuration ---
+REPO_URL="https://github.com/0xb0rn3/r3cond0g.git" # Your repository URL
 REPO_NAME="r3cond0g"
+TOOL_EXECUTABLE_NAME="r3cond0g"
+MAIN_GO_FILE="main.go"
+GO_MOD_FILE="go.mod"
 UPDATE_CHECK_FILE=".last_update_check"
-UPDATE_CHECK_INTERVAL=3600  # Check for updates every hour (in seconds)
+UPDATE_CHECK_INTERVAL=3600 # Check for updates every 1 hour (3600 seconds)
 
-# Colors for minimal visual feedback
+# --- Colors for Visual Feedback ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
-# Function to print status messages
+# --- Helper Functions for Printing Messages ---
+print_header() {
+    echo -e "${MAGENTA}╔═════════════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║                      ${CYAN}ReconRaptor (r3cond0g) Runner${MAGENTA}                      ║${NC}"
+    echo -e "${MAGENTA}║                     ${BLUE}Enhanced Environment Setup & Launch${MAGENTA}                 ║${NC}"
+    echo -e "${MAGENTA}║                          ${YELLOW}Script Version: 0.2.2${MAGENTA}                           ║${NC}"
+    echo -e "${MAGENTA}╚═════════════════════════════════════════════════════════════════════════════╝${NC}"
+    echo
+}
+
 print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "${BLUE}[⚙️ INFO]${NC} $1"
 }
 
 print_success() {
-    echo -e "${GREEN}[✓]${NC} $1"
+    echo -e "${GREEN}[✓ OKAY]${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}[✗]${NC} $1"
+    echo -e "${RED}[✗ FAIL]${NC} $1"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[!]${NC} $1"
+    echo -e "${YELLOW}[⚠️ WARN]${NC} $1"
 }
 
 print_update() {
-    echo -e "${CYAN}[UPDATE]${NC} $1"
+    echo -e "${CYAN}[🔄 UPDATE]${NC} $1"
 }
 
-# Function to detect OS
+# --- OS Detection ---
 detect_os() {
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if command -v apt-get &> /dev/null; then
-            echo "ubuntu"
-        elif command -v yum &> /dev/null; then
-            echo "centos"
-        elif command -v pacman &> /dev/null; then
-            echo "arch"
-        else
-            echo "linux"
+        if command -v apt-get &> /dev/null; then echo "ubuntu";
+        elif command -v yum &> /dev/null; then echo "centos";
+        elif command -v pacman &> /dev/null; then echo "arch";
+        else echo "linux"; fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then echo "macos";
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then echo "windows";
+    else echo "unknown"; fi
+}
+
+# --- Dependency Installation ---
+install_tool() {
+    local tool_name="$1"
+    local install_cmd="$2"
+    local check_cmd="$3"
+
+    if ! command -v $check_cmd &> /dev/null; then
+        print_warning "$tool_name not found. Attempting to install..."
+        eval "$install_cmd"
+        if ! command -v $check_cmd &> /dev/null; then
+            print_error "Failed to install $tool_name. Please install it manually."
+            return 1
         fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "macos"
-    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
-        echo "windows"
+        print_success "$tool_name installed successfully."
     else
-        echo "unknown"
+        print_success "$tool_name found: $(${check_cmd} --version 2>/dev/null || ${check_cmd} version 2>/dev/null || echo N/A)"
     fi
-}
-
-# Function to install Git if not present
-install_git() {
-    local os=$(detect_os)
-    print_status "Installing Git for $os..."
-    
-    case $os in
-        "ubuntu")
-            sudo apt-get update -qq 2>/dev/null
-            sudo apt-get install -y git 2>/dev/null
-            ;;
-        "centos")
-            sudo yum install -y git 2>/dev/null
-            ;;
-        "arch")
-            sudo pacman -S --noconfirm git 2>/dev/null
-            ;;
-        "macos")
-            if command -v brew &> /dev/null; then
-                brew install git 2>/dev/null
-            else
-                print_error "Homebrew not found. Please install Git manually"
-                exit 1
-            fi
-            ;;
-        "windows")
-            print_warning "Windows detected. Please install Git manually from https://git-scm.com/"
-            exit 1
-            ;;
-        *)
-            print_error "Unsupported OS. Please install Git manually"
-            exit 1
-            ;;
-    esac
-}
-
-# Function to check if Git is installed
-check_git() {
-    if ! command -v git &> /dev/null; then
-        print_warning "Git not found. Installing..."
-        install_git
-        print_success "Git installation completed"
-    else
-        print_success "Git found: $(git --version | cut -d' ' -f3)"
-    fi
-}
-
-# Function to install Go based on OS
-install_golang() {
-    local os=$(detect_os)
-    print_status "Installing Go for $os..."
-    
-    case $os in
-        "ubuntu")
-            sudo apt-get update -qq 2>/dev/null
-            sudo apt-get install -y golang-go wget curl 2>/dev/null
-            ;;
-        "centos")
-            sudo yum install -y golang wget curl 2>/dev/null
-            ;;
-        "arch")
-            sudo pacman -S --noconfirm go wget curl 2>/dev/null
-            ;;
-        "macos")
-            if command -v brew &> /dev/null; then
-                brew install go 2>/dev/null
-            else
-                print_error "Homebrew not found. Please install Go manually from https://golang.org/dl/"
-                exit 1
-            fi
-            ;;
-        "windows")
-            print_warning "Windows detected. Please install Go manually from https://golang.org/dl/"
-            print_warning "Then run this script in Git Bash or WSL"
-            exit 1
-            ;;
-        *)
-            print_error "Unsupported OS. Please install Go manually from https://golang.org/dl/"
-            exit 1
-            ;;
-    esac
-}
-
-# Function to check if Go is installed
-check_golang() {
-    if ! command -v go &> /dev/null; then
-        print_warning "Go not found. Installing..."
-        install_golang
-        print_success "Go installation completed"
-    else
-        print_success "Go found: $(go version | cut -d' ' -f3)"
-    fi
-}
-
-# Function to get current local commit hash
-get_local_commit() {
-    if [ -d ".git" ]; then
-        git rev-parse HEAD 2>/dev/null || echo "unknown"
-    else
-        echo "not_a_repo"
-    fi
-}
-
-# Function to get remote commit hash
-get_remote_commit() {
-    # This gets the latest commit hash from the remote repository without downloading
-    git ls-remote "$REPO_URL" HEAD 2>/dev/null | cut -f1 || echo "unknown"
-}
-
-# Function to check if we should check for updates (based on time interval)
-should_check_updates() {
-    if [ ! -f "$UPDATE_CHECK_FILE" ]; then
-        return 0  # No check file exists, should check
-    fi
-    
-    local last_check=$(cat "$UPDATE_CHECK_FILE" 2>/dev/null || echo "0")
-    local current_time=$(date +%s)
-    local time_diff=$((current_time - last_check))
-    
-    if [ $time_diff -gt $UPDATE_CHECK_INTERVAL ]; then
-        return 0  # Time interval exceeded, should check
-    else
-        return 1  # Too soon to check again
-    fi
-}
-
-# Function to update the last check timestamp
-update_check_timestamp() {
-    date +%s > "$UPDATE_CHECK_FILE"
-}
-
-# Function to check for updates
-check_for_updates() {
-    print_status "Checking for updates..."
-    
-    # Update the timestamp regardless of outcome
-    update_check_timestamp
-    
-    local local_commit=$(get_local_commit)
-    local remote_commit=$(get_remote_commit)
-    
-    if [ "$remote_commit" = "unknown" ]; then
-        print_warning "Unable to check for updates (network/repository issue)"
-        return 1
-    fi
-    
-    if [ "$local_commit" = "not_a_repo" ]; then
-        print_warning "Current directory is not a Git repository"
-        return 1
-    fi
-    
-    if [ "$local_commit" = "unknown" ]; then
-        print_warning "Unable to determine local version"
-        return 1
-    fi
-    
-    if [ "$local_commit" = "$remote_commit" ]; then
-        print_success "You have the latest version"
-        return 1
-    else
-        print_update "New update available!"
-        print_update "Current: ${local_commit:0:8}"
-        print_update "Latest:  ${remote_commit:0:8}"
-        return 0
-    fi
-}
-
-# Function to ask user for update permission
-ask_update_permission() {
-    echo
-    print_update "┌─────────────────────────────────────────────────────────────┐"
-    print_update "│                    UPDATE AVAILABLE                        │"
-    print_update "│                                                             │"
-    print_update "│ A newer version of r3cond0g is available on the repository │"
-    print_update "│ Would you like to download and install the update?         │"
-    print_update "└─────────────────────────────────────────────────────────────┘"
-    echo
-    
-    while true; do
-        echo -n -e "${CYAN}[UPDATE]${NC} Install update? (y/n): "
-        read -r response
-        case $response in
-            [Yy]* ) return 0;;  # User wants to update
-            [Nn]* ) return 1;;  # User declined update
-            * ) echo "Please answer yes (y) or no (n).";;
-        esac
-    done
-}
-
-# Function to perform the update
-perform_update() {
-    print_status "Starting update process..."
-    
-    # Create a temporary directory for the update
-    local temp_dir=$(mktemp -d)
-    local current_dir=$(pwd)
-    
-    # Backup current version
-    print_status "Creating backup of current version..."
-    cp -r . "${temp_dir}/backup" 2>/dev/null || true
-    
-    # Store the script name for later execution
-    local script_name=$(basename "$0")
-    
-    # Update the repository
-    print_status "Downloading latest version..."
-    if git pull origin main 2>/dev/null || git pull origin master 2>/dev/null; then
-        print_success "Update downloaded successfully"
-        
-        # Make sure the runner script is executable
-        chmod +x "$script_name" 2>/dev/null || true
-        
-        print_success "Update completed successfully!"
-        print_status "Restarting with updated version..."
-        
-        # Clean up temp directory
-        rm -rf "$temp_dir" 2>/dev/null || true
-        
-        echo "════════════════════════════════════════════════════════════════"
-        echo
-        
-        # Restart the script with the same arguments
-        exec "./$script_name" "$@"
-        
-    else
-        print_error "Update failed. Restoring backup..."
-        
-        # Restore from backup if update failed
-        if [ -d "${temp_dir}/backup" ]; then
-            rm -rf ./* 2>/dev/null || true
-            cp -r "${temp_dir}/backup"/* . 2>/dev/null || true
-            chmod +x "$script_name" 2>/dev/null || true
-            print_success "Backup restored"
-        fi
-        
-        # Clean up temp directory
-        rm -rf "$temp_dir" 2>/dev/null || true
-        
-        print_error "Update failed. Continuing with current version..."
-        return 1
-    fi
-}
-
-# Function to handle the update process
-handle_updates() {
-    # Only check for updates if enough time has passed or forced
-    if should_check_updates || [ "$1" = "--force-update-check" ]; then
-        print_status "Checking for updates from repository..."
-        
-        if check_for_updates; then
-            if ask_update_permission; then
-                perform_update "$@"
-                # If we reach this point, the update failed
-                return 1
-            else
-                print_status "Update declined by user. Continuing with current version..."
-            fi
-        fi
-    else
-        print_status "Skipping update check (checked recently)"
-    fi
-    
     return 0
 }
 
-# Function to initialize Go module if needed
-init_go_module() {
-    if [ ! -f "go.mod" ]; then
-        print_status "Initializing Go module..."
-        go mod init r3cond0g 2>/dev/null
-        print_success "Go module initialized"
+install_git() {
+    local os=$(detect_os)
+    print_status "Checking Git for $os..."
+    case $os in
+        "ubuntu") install_tool "Git" "sudo apt-get update -qq && sudo apt-get install -y git" "git";;
+        "centos") install_tool "Git" "sudo yum install -y git" "git";;
+        "arch")   install_tool "Git" "sudo pacman -S --noconfirm git" "git";;
+        "macos")  install_tool "Git" "brew install git" "git" || print_error "Homebrew not found. Install Git manually.";;
+        "windows") print_warning "Windows detected. Please install Git manually from https://git-scm.com/"; return 1;;
+        *) print_error "Unsupported OS for automatic Git installation. Please install Git manually."; return 1;;
+    esac
+}
+
+install_golang() {
+    local os=$(detect_os)
+    print_status "Checking Go for $os..."
+    case $os in
+        "ubuntu") install_tool "Go" "sudo apt-get update -qq && sudo apt-get install -y golang-go" "go";;
+        "centos") install_tool "Go" "sudo yum install -y golang" "go";;
+        "arch")   install_tool "Go" "sudo pacman -S --noconfirm go" "go";;
+        "macos")  install_tool "Go" "brew install go" "go" || print_error "Homebrew not found. Install Go manually.";;
+        "windows") print_warning "Windows detected. Please install Go manually from https://golang.org/dl/"; return 1;;
+        *) print_error "Unsupported OS for automatic Go installation. Please install Go manually from https://golang.org/dl/"; return 1;;
+    esac
+}
+
+# --- Update Mechanism ---
+get_git_commit_hash() {
+    git rev-parse HEAD 2>/dev/null || echo "unknown"
+}
+
+get_remote_commit_hash() {
+    git ls-remote "$REPO_URL" HEAD 2>/dev/null | cut -f1 || echo "remote_unknown"
+}
+
+should_check_for_updates() {
+    [ ! -f "$UPDATE_CHECK_FILE" ] && return 0
+    local last_check=$(cat "$UPDATE_CHECK_FILE" 2>/dev/null || echo "0")
+    local current_time=$(date +%s)
+    [ $((current_time - last_check)) -gt $UPDATE_CHECK_INTERVAL ] && return 0
+    return 1
+}
+
+update_last_check_timestamp() {
+    echo "$(date +%s)" > "$UPDATE_CHECK_FILE"
+}
+
+check_for_updates_core() {
+    local local_commit=$(get_git_commit_hash)
+    local remote_commit=$(get_remote_commit_hash)
+    update_last_check_timestamp
+
+    if [ "$local_commit" = "unknown" ] || [ "$remote_commit" = "remote_unknown" ]; then
+        print_warning "Could not determine local or remote version. Skipping update check."
+        return 1
     fi
-}
 
-# Function to install dependencies
-install_dependencies() {
-    print_status "Installing Go dependencies..."
-    
-    # Add required dependencies to go.mod
-    go get golang.org/x/time/rate 2>/dev/null || true
-    go get github.com/google/gopacket 2>/dev/null || true
-    go get github.com/google/gopacket/pcap 2>/dev/null || true
-    go get github.com/google/gopacket/layers 2>/dev/null || true
-    go get gonum.org/v1/gonum/graph 2>/dev/null || true
-    go get gonum.org/v1/gonum/graph/encoding/dot 2>/dev/null || true
-    go get gonum.org/v1/gonum/graph/simple 2>/dev/null || true
-    
-    go mod tidy 2>/dev/null
-    print_success "Dependencies installed"
-}
-
-# Function to compile the binary
-compile_binary() {
-    print_status "Compiling r3cond0g..."
-    if go build -ldflags="-s -w" -o r3cond0g main.go 2>/dev/null; then
-        print_success "Compilation successful"
-        chmod +x r3cond0g
-    else
-        print_error "Compilation failed"
-        exit 1
+    if [ "$local_commit" != "$remote_commit" ]; then
+        print_update "A new version is available!"
+        print_update "  Current: ${local_commit:0:12}"
+        print_update "  Latest:  ${remote_commit:0:12}"
+        return 0 # Updates available
     fi
+    print_success "Your ReconRaptor is up to date (commit: ${local_commit:0:7})."
+    return 1 # No updates
 }
 
-# Function to check if binary needs recompilation
-needs_recompilation() {
-    if [ ! -f "r3cond0g" ]; then
-        return 0  # Binary doesn't exist
-    fi
-    
-    if [ "main.go" -nt "r3cond0g" ]; then
-        return 0  # Source is newer than binary
-    fi
-    
-    return 1  # Binary is up to date
-}
-
-# Function to show help information
-show_help() {
-    echo "r3cond0g Runner Script v0.1"
+confirm_and_perform_update() {
     echo
-    echo "Usage: $0 [OPTIONS]"
+    print_update "╔════════════════════════════════════════════════════════════╗"
+    print_update "║                     UPDATE AVAILABLE                       ║"
+    print_update "║  A new version of ReconRaptor is available.                ║"
+    print_update "║  Would you like to download and apply the update now?      ║"
+    print_update "╚════════════════════════════════════════════════════════════╝"
     echo
-    echo "Options:"
-    echo "  --force-update-check    Force check for updates regardless of time interval"
-    echo "  --skip-update-check     Skip update check entirely"
-    echo "  --help                  Show this help message"
-    echo
-    echo "The script will automatically:"
-    echo "  1. Check for updates from the Git repository (if enabled)"
-    echo "  2. Install required dependencies (Go, Git)"
-    echo "  3. Compile the latest version of r3cond0g"
-    echo "  4. Launch the tool"
-    echo
-}
-
-# Main execution flow
-main() {
-    # Handle command line arguments
-    local skip_updates=false
-    local force_updates=false
-    
-    for arg in "$@"; do
-        case $arg in
-            --help)
-                show_help
-                exit 0
+    while true; do
+        echo -n -e "${CYAN}[❓ PROMPT]${NC} Install update? (Y/es to update, N/o to skip): "
+        read -r response
+        case $response in
+            [Yy]|[Yy][Ee][Ss])
+                print_status "Attempting to update ReconRaptor..."
+                if git pull --ff-only; then # Fast-forward only to avoid merge conflicts on runner
+                    print_success "Update downloaded. Restarting script..."
+                    # Ensure the runner itself is executable if it was updated
+                    chmod +x "$0" 2>/dev/null || true
+                    exec "$0" "$@" # Restart the script to apply changes (especially if runner itself changed)
+                else
+                    print_error "Automatic update failed. 'git pull' encountered issues."
+                    print_warning "You might need to resolve conflicts manually or try 'git reset --hard origin/main' (or your branch name)."
+                    print_status "Continuing with the current version."
+                    return 1
+                fi
                 ;;
-            --skip-update-check)
-                skip_updates=true
+            [Nn]|[Nn][Oo])
+                print_status "Update declined. Continuing with the current version."
+                return 1
                 ;;
-            --force-update-check)
-                force_updates=true
-                ;;
+            *) echo "Please answer (Y)es or (N)o.";;
         esac
     done
-    
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║         r3cond0g Runner v0.1 by 0xb0rn3 | 0xbv1             ║"
-    echo "║               Enhanced Environment Setup                    ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo
+}
 
-    # Check if we're in the right directory
-    if [ ! -f "main.go" ]; then
-        print_error "main.go not found. Please run this script from the r3cond0g directory."
+handle_updates_workflow() {
+    local force_check="$1"
+    shift # Remove the first argument, pass the rest to exec if update happens
+
+    if [ "$force_check" = true ] || should_check_for_updates; then
+        print_status "Checking for ReconRaptor updates..."
+        if check_for_updates_core; then # If updates are available
+            confirm_and_perform_update "$@" # Pass original script args
+        fi
+    else
+        print_status "Skipping update check (checked recently)."
+    fi
+}
+
+# --- Go Project Management ---
+initialize_go_module() {
+    if [ ! -f "$GO_MOD_FILE" ]; then
+        print_status "Go module file ('$GO_MOD_FILE') not found. Initializing..."
+        # Use the directory name as the module path for simplicity if not a standard vanity import path
+        local module_name=$(basename "$(pwd)")
+        go mod init "$module_name" || print_warning "Could not auto-initialize go module. 'go mod tidy' might fail."
+        print_success "Go module initialized."
+    else
+        print_success "Go module file ('$GO_MOD_FILE') found."
+    fi
+}
+
+manage_go_dependencies() {
+    print_status "Managing Go dependencies..."
+    # Explicitly get direct critical dependencies if they might be missing from go.mod
+    # For ReconRaptor 0.2.2, main.go primarily uses "golang.org/x/time/rate"
+    go get golang.org/x/time/rate 2>/dev/null || print_warning "Failed to 'go get golang.org/x/time/rate'. Check network."
+
+    # Tidy up the module
+    if go mod tidy; then
+        print_success "Go dependencies are tidy."
+    else
+        print_warning "'go mod tidy' encountered issues. Compilation may fail."
+    fi
+}
+
+needs_recompilation_check() {
+    [ ! -f "$TOOL_EXECUTABLE_NAME" ] && return 0 # Binary doesn't exist
+    # Check if any .go file or go.mod/go.sum is newer than the binary
+    local source_file
+    for source_file in *.go "$GO_MOD_FILE" go.sum; do
+        if [ -f "$source_file" ] && [ "$source_file" -nt "$TOOL_EXECUTABLE_NAME" ]; then
+            print_status "Changes detected in '$source_file'. Recompilation needed."
+            return 0 # Needs recompilation
+        fi
+    done
+    return 1 # No recompilation needed
+}
+
+compile_tool_binary() {
+    print_status "Compiling ReconRaptor ($TOOL_EXECUTABLE_NAME from $MAIN_GO_FILE)..."
+    # -s: Omit the symbol table
+    # -w: Omit the DWARF symbol table (reduces binary size)
+    if go build -ldflags="-s -w" -o "$TOOL_EXECUTABLE_NAME" "$MAIN_GO_FILE"; then
+        print_success "ReconRaptor compiled successfully: $TOOL_EXECUTABLE_NAME"
+        chmod +x "$TOOL_EXECUTABLE_NAME"
+    else
+        print_error "Compilation failed! Check Go environment and source code."
+        exit 1
+    fi
+}
+
+# --- Help Information ---
+show_help_info() {
+    print_header
+    echo -e "${GREEN}This script automates the setup, update, compilation, and execution of ReconRaptor.${NC}"
+    echo
+    echo -e "${YELLOW}Usage:${NC} $0 [OPTIONS]"
+    echo
+    echo -e "${CYAN}Options:${NC}"
+    echo -e "  ${GREEN}--force-update-check${NC}   Force check for updates, bypassing the time interval."
+    echo -e "  ${GREEN}--skip-update-check${NC}    Skip the update check entirely for this run."
+    echo -e "  ${GREEN}--rebuild${NC}               Force recompilation of the tool."
+    echo -e "  ${GREEN}--help${NC}                  Show this help message and exit."
+    echo
+    echo -e "${BLUE}Workflow:${NC}"
+    echo -e "  1. Checks/installs Git and Go."
+    echo -e "  2. Checks for remote updates (if applicable) and prompts to apply."
+    echo -e "  3. Initializes Go module and tidies dependencies."
+    echo -e "  4. Compiles ReconRaptor if needed or if source files have changed."
+    echo -e "  5. Executes the compiled ReconRaptor tool."
+    echo
+    exit 0
+}
+
+# --- Main Execution Logic ---
+main_flow() {
+    local skip_updates_flag=false
+    local force_updates_flag=false
+    local force_rebuild_flag=false
+    local tool_args=() # Arguments to pass to ReconRaptor itself
+
+    # Parse runner script arguments
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help) show_help_info;;
+            --skip-update-check) skip_updates_flag=true; shift;;
+            --force-update-check) force_updates_flag=true; shift;;
+            --rebuild) force_rebuild_flag=true; shift;;
+            --) shift; tool_args+=("$@"); break;; # All subsequent args are for the tool
+            *) tool_args+=("$1"); shift;; # Assume it's an arg for ReconRaptor
+        esac
+    done
+
+    print_header
+
+    # Pre-requisite: Check if main Go file exists
+    if [ ! -f "$MAIN_GO_FILE" ]; then
+        print_error "$MAIN_GO_FILE not found. Ensure you are in the ReconRaptor root directory."
+        print_warning "If this is a fresh clone, there might be an issue with the repository structure or clone process."
         exit 1
     fi
 
-    # Step 1: Check Git installation (needed for updates)
-    check_git
+    # Step 1: Ensure Git and Go are available
+    install_git || exit 1
+    install_golang || exit 1
 
-    # Step 2: Handle updates (unless explicitly skipped)
-    if [ "$skip_updates" = false ]; then
-        if [ "$force_updates" = true ]; then
-            handle_updates --force-update-check "$@"
-        else
-            handle_updates "$@"
-        fi
+    # Step 2: Handle Updates (if not skipped)
+    if [ "$skip_updates_flag" = false ]; then
+        handle_updates_workflow "$force_updates_flag" "${tool_args[@]}" # Pass tool_args for exec
     else
-        print_status "Skipping update check as requested"
+        print_status "Update check skipped by user."
     fi
 
-    # Step 3: Check Go installation 
-    check_golang
+    # Step 3: Go Module and Dependencies
+    initialize_go_module
+    manage_go_dependencies
 
-    # Step 4: Initialize Go module
-    init_go_module
-
-    # Step 5: Install dependencies
-    install_dependencies
-
-    # Step 6: Check if compilation is needed
-    if needs_recompilation; then
-        compile_binary
+    # Step 4: Compile Binary
+    if [ "$force_rebuild_flag" = true ]; then
+        print_status "Forcing rebuild as requested."
+        compile_tool_binary
+    elif needs_recompilation_check; then
+        compile_tool_binary
     else
-        print_success "Binary is up to date"
+        print_success "ReconRaptor binary is up to date. No recompilation needed."
     fi
 
-    # Step 7: Execute the tool
+    # Step 5: Execute ReconRaptor
     echo
-    print_success "Setup complete! Launching r3cond0g..."
-    echo "════════════════════════════════════════════════════════════════"
+    print_status "Launching ReconRaptor..."
+    echo -e "${MAGENTA}═════════════════════════════════════════════════════════════════════════════${NC}"
     echo
-    
-    # Execute the compiled binary
-     clear
-    ./r3cond0g
+
+    # Clear screen before launching the tool for a cleaner UI
+    # clear # Uncomment if you prefer the screen to be cleared
+
+    # Execute the compiled binary with its specific arguments
+    "./$TOOL_EXECUTABLE_NAME" "${tool_args[@]}"
+
+    echo
+    echo -e "${MAGENTA}═════════════════════════════════════════════════════════════════════════════${NC}"
+    print_success "ReconRaptor session ended."
 }
 
-# Run main function with all arguments
-main "$@"
+# --- Script Entry Point ---
+main_flow "$@"
