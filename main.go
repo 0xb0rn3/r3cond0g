@@ -447,10 +447,6 @@ func parseSingleTarget(target string) []string {
 	return []string{target} // Assume it's a hostname
 }
 
-// =======================================================================================
-// PART 2: ENHANCED PORT SCANNING WITH BETTER CONCURRENCY CONTROL
-// This replaces my existing scanTCPPort function for better performance
-// =======================================================================================
 
 func scanTCPPort(host string, port int) *EnhancedScanResult {
 	timeout := time.Duration(config.ScanTimeout) * time.Millisecond
@@ -562,11 +558,6 @@ func scanUDPPort(host string, port int) *EnhancedScanResult {
 	}
 	return nil
 }
-
-// =======================================================================================
-// PART 3: IMPROVED SERVICE DETECTION WITH MORE PROTOCOLS
-// This enhances my service detection capabilities
-// =======================================================================================
 
 type ServiceProbe struct {
 	Name    string
@@ -883,10 +874,6 @@ func guessOS(result *EnhancedScanResult) string {
 
 // Removed old Probe interface and portProbes map as they are superseded by ServiceProbe and enhancedProbes
 
-// =======================================================================================
-// PART 1: REPLACE THE NVD API QUERY FUNCTION
-// This fixes the 403 authentication errors users keep seeing
-// =======================================================================================
 
 func queryNVD(cpe string) ([]string, error) {
 	// Wait for rate limiter before making request
@@ -1078,11 +1065,6 @@ func loadCustomCVEs() {
 	}
 	fmt.Printf("✅ Loaded %d custom CVE mappings from %s\n", len(customCVEs), config.CVEPluginFile)
 }
-
-// =======================================================================================
-// PART 4: INTELLIGENT SCAN OPTIMIZATION
-// This replaces my main scanning loop for better performance
-// =======================================================================================
 
 func runUltraFastScan() []EnhancedScanResult {
 	fmt.Println("🚀 Starting optimized ultra-fast scan...")
@@ -1419,10 +1401,6 @@ func parseNmapResults() {
 	}
 }
 
-// =======================================================================================
-// PART 5: ENHANCED VULNERABILITY MAPPING WITH BETTER ERROR HANDLING
-// This replaces my existing mapVulnerabilities function
-// =======================================================================================
 
 func mapVulnerabilities(result *EnhancedScanResult) {
 	if !config.VulnMapping {
