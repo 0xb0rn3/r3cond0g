@@ -151,6 +151,7 @@ check_for_updates_core() {
     fi
     print_success "Your ReconRaptor is up to date (commit: ${local_commit:0:7})."
     return 1 # No updates
+    clear
 }
 
 confirm_and_perform_update() {
@@ -329,6 +330,7 @@ main_flow() {
         compile_tool_binary
     else
         print_success "ReconRaptor binary is up to date. No recompilation needed."
+        clear
     fi
 
     # Step 5: Execute ReconRaptor
