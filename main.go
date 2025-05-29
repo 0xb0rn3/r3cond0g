@@ -144,8 +144,48 @@ var (
 func main() {
 	printBanner()
 	loadConfigFromEnv()
-	parseCommandLineFlags()
+	parseCommandLineFlags() // Parses flags into config struct
 	loadCustomCVEs()
+
+	// Scenario 1: Attempt to run a scan directly if target and ports are specified
+	if (config.TargetHost != "" || config.TargetFile != "") && config.PortRange != "" {
+		// Ensure this isn't primarily an Nmap parsing operation from flags
+		if config.NmapResultsFile == "" || (config.NmapResultsFile != "" && (config.TargetHost != "" || config.TargetFile != "")) {
+			fmt.Println("ℹ️  Target and ports provided, attempting direct scan...")
+			if validateConfig() {
+				results = runUltraFastScan()
+				if config.VulnMapping && len(results) > 0 {
+					performVulnerabilityMapping()
+				}
+				if config.TopologyMapping && len(results) > 0 {
+					generateTopologyMap()
+				}
+				if len(results) > 0 {
+					displayResults()
+					saveResults() // Auto-save after direct scan
+				} else {
+					fmt.Println("ℹ️  Direct scan completed. No open ports matching criteria found.")
+				}
+				fmt.Println("👋 Exiting r3cond0g v" + VERSION)
+				return // Exit after direct scan
+			} else {
+				fmt.Println("❌ Direct scan aborted due to invalid configuration. Falling back to interactive menu.")
+			}
+		}
+	}
+
+	// Scenario 2: Attempt to parse Nmap results directly if file specified and no target scan intended
+	if config.NmapResultsFile != "" && !(config.TargetHost != "" || config.TargetFile != "") {
+		fmt.Printf("ℹ️  Nmap results file '%s' provided, attempting direct parse...\n", config.NmapResultsFile)
+		parseNmapResults() // This function already handles vuln mapping if enabled and displays results
+		if len(results) > 0 {
+			saveResults() // Auto-save after direct parse
+		}
+		fmt.Println("👋 Exiting r3cond0g v" + VERSION)
+		return // Exit after direct parse
+	}
+
+	// Fallback to interactive menu if no direct action was taken
 	for {
 		showMenu()
 		choice := getUserChoice()
@@ -524,14 +564,11 @@ func scanUDPPort(host string, port int) *EnhancedScanResult {
 					ResponseTime: time.Since(start),
 					Timestamp:    time.Now(),
 				}
-				// For open|filtered, service detection is less reliable but we can try
 				serviceDetectionTimeout := timeout / 2
 				if serviceDetectionTimeout < 50*time.Millisecond {
 					serviceDetectionTimeout = 50 * time.Millisecond
 				}
-				// Note: detectServiceWithTimeout for UDP currently just returns the default service.
-				// True UDP service detection would need more sophisticated probes and response analysis.
-				result.Service, result.Version = detectServiceWithTimeout(nil, port, "udp", serviceDetectionTimeout) // Pass nil conn for UDP default
+				result.Service, result.Version = detectServiceWithTimeout(nil, port, "udp", serviceDetectionTimeout) 
 				result.OSGuess = guessOS(result)
 				return result
 			}
@@ -551,8 +588,32 @@ func scanUDPPort(host string, port int) *EnhancedScanResult {
 		if serviceDetectionTimeout < 50*time.Millisecond {
 			serviceDetectionTimeout = 50 * time.Millisecond
 		}
-		// Pass nil conn for UDP default, actual response in buffer[:n] could be used for smarter detection later
-		result.Service, result.Version = detectServiceWithTimeout(nil, port, "udp", serviceDetectionTimeout)
+
+		// Specific check for DNS before generic detection
+		if port == 53 && n >= 12 { // DNS header is 12 bytes
+			isResponse := (buffer[2] & 0x80) != 0 // QR bit (1 = response)
+			opCode := (buffer[2] >> 3) & 0x0F    // Opcode
+			responseCode := buffer[3] & 0x0F     // RCODE
+
+			if isResponse && opCode == 0 { // Standard query response
+				result.Service = "dns"
+				if responseCode == 0 {
+					result.Version = "response NOERROR"
+				} else {
+					result.Version = fmt.Sprintf("response RCODE %d", responseCode)
+				}
+			}
+		}
+		
+		// Call generic service detection; it might overwrite or use the above if logic is refined there
+		detectedService, detectedVersion := detectServiceWithTimeout(nil, port, "udp", serviceDetectionTimeout)
+		if result.Service == "dns" && strings.HasPrefix(result.Version, "response") {
+			// Keep more specific DNS info if already set
+		} else {
+			result.Service = detectedService
+			result.Version = detectedVersion
+		}
+
 		result.OSGuess = guessOS(result)
 		return result
 	}
@@ -731,6 +792,7 @@ func detectServiceWithTimeout(conn net.Conn, port int, protocol string, timeout 
 	} else if protocol == "udp" {
 		// For UDP, conn is often nil in the current detectServiceWithTimeout call structure
 		// We just return the default mapped service. True UDP service detection is more complex.
+		// Specific UDP checks (like the DNS one in scanUDPPort) should ideally update result before this.
 		return service, "unknown (UDP)"
 	}
 
@@ -1129,7 +1191,8 @@ func runUltraFastScan() []EnhancedScanResult {
 			if totalScans == 0 { // Avoid division by zero
 				continue
 			}
-			if current > 0 {
+			if current > 0 { // Only update if progress has started
+				if current > totalScans { current = totalScans } // Cap current at totalScans for display
 				percentage := float64(current) / float64(totalScans) * 100
 				elapsed := time.Since(start)
 				var rate float64
@@ -1191,11 +1254,14 @@ func runUltraFastScan() []EnhancedScanResult {
 
 	// Wait for all scans to complete
 	wg.Wait()
+	time.Sleep(100 * time.Millisecond) // Brief pause to allow final progress update to render if needed
 	progressTicker.Stop()          // Stop the ticker explicitly
-	atomic.LoadInt64(&scannedPorts) // Ensure final value is loaded before printing
 	
+	currentScanned := atomic.LoadInt64(&scannedPorts) // Ensure final value is loaded
+	if currentScanned > totalScans { currentScanned = totalScans } // Cap for display
+
 	displayMutex.Lock() // Ensure final progress line doesn't get overwritten
-	fmt.Printf("\r\033[K🔍 Progress: %d/%d (100.0%%) | Scan Complete.                                          \n", totalScans, totalScans)
+	fmt.Printf("\r\033[K🔍 Progress: %d/%d (100.0%%) | Scan Complete.                                          \n", currentScanned, totalScans)
 	displayMutex.Unlock()
 
 
@@ -1415,7 +1481,7 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 
 	// Key for customCVEs and nvdCache can be more flexible.
 	// Using "service version" (original case for version) for now.
-	key := fmt.Sprintf("%s %s", serviceKey, versionKey)
+	// key := fmt.Sprintf("%s %s", serviceKey, versionKey) // This variable 'key' was not used, removed.
 
 
 	// Check custom CVE database first (assumes customCVEs keys are "service version")
@@ -1597,6 +1663,18 @@ func generateTopologyMap() {
 	// For a simple port scan, direct connections aren't discovered, so we just list hosts.
 	// Example: if we knew hostA:webserver talks to hostB:database
 	// dotGraph.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\" [label=\"db connect\"];\n", "hostA_fqdn", "hostB_fqdn"));
+    // // To make this practical, the scan would need to discover relationships,
+    // // or this information would come from another source (e.g., netflow data, application config).
+    // // For instance, if service detection on one host identified it as a client connecting 
+    // // to a specific remote IP/service that was also in the scan results:
+    // for _, result := range results {
+    //     if result.Host == "client.example.com" && result.Service == "myapp_client" && strings.Contains(result.Version, "connects_to_db.example.com") {
+    //         // Check if "db.example.com" is a known host in hostServices
+    //         if _, ok := hostServices["db.example.com"]; ok {
+    //             dotGraph.WriteString(fmt.Sprintf("  \"%s\" -> \"%s\" [label=\"identified db connection\"];\n", "client.example.com", "db.example.com"))
+    //         }
+    //     }
+    // }
 
 
 	dotGraph.WriteString("}\n")
@@ -2015,15 +2093,14 @@ func parseCommandLineFlags() {
     flag.Usage = func() {
         fmt.Fprintf(os.Stderr, "ReconRaptor (r3cond0g) - Advanced RedTeaming Network Recon Tool v%s\nUsage: %s [options]\n\nOptions:\n", VERSION, os.Args[0])
         flag.PrintDefaults()
-        fmt.Fprintf(os.Stderr, "\nExample: %s -target 192.168.1.0/24 -ports 1-1024 -vuln -nvd-key YOUR_API_KEY\n", os.Args[0])
+        fmt.Fprintf(os.Stderr, "\nExample (direct scan): %s -target 192.168.1.0/24 -ports 1-1024 -vuln -nvd-key YOUR_API_KEY\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Example (Nmap parse): %s -nmap-file results.xml -vuln\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Example (interactive): %s\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "More info & docs: https://github.com/0xb0rn3/ReconRaptor\n") // Replace with actual repo URL
     }
 
 	flag.Parse()
 
-	// After parsing flags, if an Nmap file is provided, suggest interactive mode or direct parsing
-	if config.NmapResultsFile != "" && len(flag.Args()) == 0 && config.TargetHost == "" && config.TargetFile == "" {
-		// This implies the user might just want to parse Nmap and then interact
-		fmt.Printf("ℹ️  Nmap file '%s' provided. You can parse it using option 5 in the menu.\n", config.NmapResultsFile)
-	}
+	// The informational message about Nmap file previously here has been removed
+	// as the main() function now handles direct execution logic more comprehensively.
 }
