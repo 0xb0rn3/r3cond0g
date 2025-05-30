@@ -53,7 +53,7 @@ type Config struct {
 	OnlyOpenPorts        bool   `json:"only_open_ports"`
 	CVEPluginFile        string `json:"cve_plugin_file"`
 	PingSweepTCP         bool   `json:"ping_sweep_tcp"`   // Renamed from PingSweep for clarity
-	PingSweepICMP        bool   `json:"ping_sweep_icmp"`  // Added from version 0.2.4
+	PingSweepICMP        bool   `json:"ping_sweep_icmp"`  // Added from older version 
 	PingSweepPorts       string `json:"ping_sweep_ports"` // Ports for TCP Ping
 	PingSweepTimeout     int    `json:"ping_sweep_timeout"`
 	EnableMACLookup      bool   `json:"enable_mac_lookup"`
