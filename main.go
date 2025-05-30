@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
@@ -31,16 +32,18 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const VERSION = "0.2.3 ReconRaptor"
+// VERSION is the current version of the tool
+const VERSION = "0.2.3 ReconRaptor" // Incremented version
 const APP_NAME = "r3cond0g"
 const AUTHORS = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
 
+// Config for the tool's configuration
 type Config struct {
 	TargetHost           string `json:"target_host"`
 	TargetFile           string `json:"target_file"`
 	PortRange            string `json:"port_range"`
-	ScanTimeout          int    `json:"scan_timeout"`
-	ServiceDetectTimeout int    `json:"service_detect_timeout"`
+	ScanTimeout          int    `json:"scan_timeout"`          // Overall timeout for a port scan attempt (connect)
+	ServiceDetectTimeout int    `json:"service_detect_timeout"` // Specific timeout for service detection phase
 	MaxConcurrency       int    `json:"max_concurrency"`
 	OutputFile           string `json:"output_file"`
 	UDPScan              bool   `json:"udp_scan"`
@@ -50,14 +53,15 @@ type Config struct {
 	NmapResultsFile      string `json:"nmap_results_file"`
 	OnlyOpenPorts        bool   `json:"only_open_ports"`
 	CVEPluginFile        string `json:"cve_plugin_file"`
-	PingSweep            bool   `json:"ping_sweep"`
-	ICMPSweep            bool   `json:"icmp_sweep"`
-	PingSweepPorts       string `json:"ping_sweep_ports"`
+	PingSweepTCP         bool   `json:"ping_sweep_tcp"`   // Renamed from PingSweep for clarity
+	PingSweepICMP        bool   `json:"ping_sweep_icmp"`  // Added from version 0.2.4
+	PingSweepPorts       string `json:"ping_sweep_ports"` // Ports for TCP Ping
 	PingSweepTimeout     int    `json:"ping_sweep_timeout"`
 	EnableMACLookup      bool   `json:"enable_mac_lookup"`
-	ProbeFiles           string `json:"probe_files"`
+	ProbeFiles           string `json:"probe_files"` // Comma-separated list of probe definition files
 }
 
+// EnhancedScanResult with vulnerability data and OS guess
 type EnhancedScanResult struct {
 	Host                string        `json:"host"`
 	Port                int           `json:"port"`
@@ -76,31 +80,37 @@ type EnhancedScanResult struct {
 	TLSCommonName       string        `json:"tls_common_name,omitempty"`
 }
 
+// NmapRun represents the root XML structure
 type NmapRun struct {
 	XMLName xml.Name   `xml:"nmaprun"`
 	Hosts   []NmapHost `xml:"host"`
 }
 
+// NmapHost represents a host in nmap results
 type NmapHost struct {
 	Addresses []NmapAddress `xml:"address"`
 	Ports     NmapPorts     `xml:"ports"`
 	Status    NmapStatus    `xml:"status"`
 }
 
+// NmapAddress represents host address
 type NmapAddress struct {
 	Addr     string `xml:"addr,attr"`
 	AddrType string `xml:"addrtype,attr"`
 	Vendor   string `xml:"vendor,attr,omitempty"`
 }
 
+// NmapStatus for host liveness
 type NmapStatus struct {
 	State string `xml:"state,attr"`
 }
 
+// NmapPorts contains port information
 type NmapPorts struct {
 	Ports []NmapPort `xml:"port"`
 }
 
+// NmapPort represents individual port data
 type NmapPort struct {
 	Protocol string      `xml:"protocol,attr"`
 	PortID   int         `xml:"portid,attr"`
@@ -108,10 +118,12 @@ type NmapPort struct {
 	Service  NmapService `xml:"service"`
 }
 
+// NmapState represents port state
 type NmapState struct {
 	State string `xml:"state,attr"`
 }
 
+// NmapService represents service information
 type NmapService struct {
 	Name    string `xml:"name,attr"`
 	Version string `xml:"version,attr"`
@@ -213,15 +225,17 @@ var ouiData = map[string]string{
 	"00:1A:11": "ASRock Incorporation", "BC:5F:F4": "ASRock Incorporation",
 }
 
+// ServiceInfo represents the result of service detection
 type ServiceInfo struct {
 	ServiceName    string            `json:"service_name"`
 	ServiceVersion string            `json:"service_version"`
 	TLSInfo        *TLSInfo          `json:"tls_info,omitempty"`
 	ALPNProtocol   string            `json:"alpn_protocol,omitempty"`
-	Confidence     int               `json:"confidence"`
+	Confidence     int               `json:"confidence"` // 0-100
 	ExtraData      map[string]string `json:"extra_data,omitempty"`
 }
 
+// TLSInfo holds information extracted from TLS certificates
 type TLSInfo struct {
 	CommonName         string   `json:"common_name"`
 	SubjectAltNames    []string `json:"subject_alt_names"`
@@ -231,6 +245,7 @@ type TLSInfo struct {
 	SignatureAlgorithm string   `json:"signature_algorithm"`
 }
 
+// ProbeDefinition represents a single service detection probe
 type ProbeDefinition struct {
 	Name               string   `json:"name"`
 	Protocol           string   `json:"protocol"`
@@ -247,14 +262,16 @@ type ProbeDefinition struct {
 	compiledRegex      *regexp.Regexp
 }
 
+// ProbeEngine manages and executes service detection probes
 type ProbeEngine struct {
 	probes         []ProbeDefinition
 	probesByName   map[string]*ProbeDefinition
 	fallbackProbes []ProbeDefinition
 }
 
-var probeEngineInstance *ProbeEngine
+var probeEngineInstance *ProbeEngine // Global instance
 
+// NewProbeEngine creates a new probe engine and loads probe definitions
 func NewProbeEngine(probeFilePaths ...string) (*ProbeEngine, error) {
 	engine := &ProbeEngine{
 		probesByName: make(map[string]*ProbeDefinition),
@@ -307,6 +324,7 @@ func NewProbeEngine(probeFilePaths ...string) (*ProbeEngine, error) {
 	return engine, nil
 }
 
+// loadProbesFromFile loads probe definitions from a JSON file
 func (pe *ProbeEngine) loadProbesFromFile(filename string) ([]ProbeDefinition, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
@@ -323,6 +341,7 @@ func (pe *ProbeEngine) loadProbesFromFile(filename string) ([]ProbeDefinition, e
 	return probes, nil
 }
 
+// getApplicableProbes returns probes that apply to the given port and protocol, already sorted by priority
 func (pe *ProbeEngine) getApplicableProbes(port int, protocol string) []ProbeDefinition {
 	var applicable []ProbeDefinition
 	protocolLower := strings.ToLower(protocol)
@@ -348,6 +367,7 @@ func (pe *ProbeEngine) getApplicableProbes(port int, protocol string) []ProbeDef
 	return applicable
 }
 
+// executeProbe runs a single probe against the connection
 func (pe *ProbeEngine) executeProbe(originalConn net.Conn, probe ProbeDefinition, host string, overallTimeout time.Duration) (*ServiceInfo, error) {
 	probeSpecificTimeoutMs := overallTimeout
 	if probe.TimeoutMs > 0 {
@@ -532,6 +552,7 @@ func (pe *ProbeEngine) executeProbe(originalConn net.Conn, probe ProbeDefinition
 	}, nil
 }
 
+// processPayloadTemplate processes template variables in probe payloads
 func (pe *ProbeEngine) processPayloadTemplate(payload, host string) string {
 	payload = strings.ReplaceAll(payload, "{{TARGET_HOST}}", host)
 	var processedPayload strings.Builder
@@ -575,6 +596,7 @@ func (pe *ProbeEngine) processPayloadTemplate(payload, host string) string {
 	return processedPayload.String()
 }
 
+// processVersionTemplate processes version templates using regex capture groups
 func (pe *ProbeEngine) processVersionTemplate(template string, matches []string) string {
 	result := template
 	for i, matchVal := range matches {
@@ -584,6 +606,7 @@ func (pe *ProbeEngine) processVersionTemplate(template string, matches []string)
 	return strings.TrimSpace(result)
 }
 
+// normalizeServiceName normalizes service names to standard format
 func (pe *ProbeEngine) normalizeServiceName(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	switch {
@@ -656,6 +679,7 @@ func (pe *ProbeEngine) normalizeServiceName(name string) string {
 	return name
 }
 
+// normalizeVersion normalizes version strings
 func (pe *ProbeEngine) normalizeVersion(version string) string {
 	if version == "" || version == "unknown" || strings.HasPrefix(version, "banner:") {
 		return version
@@ -670,6 +694,7 @@ func (pe *ProbeEngine) normalizeVersion(version string) string {
 	return strings.TrimSpace(version)
 }
 
+// detectServiceBasic provides fallback basic service detection based on port
 func detectServiceBasic(port int, protocol string) (string, string) {
 	defaultServices := map[int]string{21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 67: "dhcp", 68: "dhcp", 69: "tftp", 80: "http", 110: "pop3", 111: "rpcbind", 123: "ntp", 135: "msrpc", 137: "netbios-ns", 138: "netbios-dgm", 139: "netbios-ssn", 143: "imap", 161: "snmp", 162: "snmptrap", 389: "ldap", 443: "https", 445: "microsoft-ds", 465: "smtps", 514: "syslog", 587: "submission", 636: "ldaps", 993: "imaps", 995: "pop3s", 1080: "socks", 1433: "mssql", 1521: "oracle", 1723: "pptp", 2049: "nfs", 3000: "http-alt", 3268: "globalcatLDAP", 3269: "globalcatLDAPssl", 3306: "mysql", 3389: "ms-wbt-server", 5060: "sip", 5061: "sips", 5222: "xmpp-client", 5353: "mdns", 5432: "postgresql", 5900: "vnc", 5985: "winrm", 5986: "winrm-ssl", 6379: "redis", 8000: "http-alt", 8080: "http-proxy", 8443: "https-alt", 27017: "mongodb"}
 	if service, exists := defaultServices[port]; exists {
@@ -678,20 +703,22 @@ func detectServiceBasic(port int, protocol string) (string, string) {
 	return "unknown", "unknown"
 }
 
-func tryGenericBannerGrab(conn net.Conn, port int, serviceDetectionTimeout time.Duration) *ServiceInfo {
+// tryGenericBannerGrab attempts a simple banner grab
+func tryGenericBannerGrab(conn net.Conn, port int, timeout time.Duration) *ServiceInfo {
 	if conn == nil {
 		return nil
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(serviceDetectionTimeout))
-	buffer := make([]byte, 2048)
+	_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	buffer := make([]byte, 2048) // Generous buffer for banners
 	n, err := conn.Read(buffer)
 	if err != nil || n == 0 {
 		return nil
 	}
 	banner := strings.TrimSpace(string(buffer[:n]))
 	if banner != "" {
-		finalServiceName, _ := detectServiceBasic(port, "tcp")
+		finalServiceName, _ := detectServiceBasic(port, "tcp") // Use basic for service name suggestion
 		finalServiceVersion := "unknown"
+		// Check if banner looks like a printable short string (often version info)
 		printableBanner := true
 		for _, r := range banner {
 			if r < 32 || r > 126 {
@@ -708,13 +735,14 @@ func tryGenericBannerGrab(conn net.Conn, port int, serviceDetectionTimeout time.
 		return &ServiceInfo{
 			ServiceName:    finalServiceName,
 			ServiceVersion: finalServiceVersion,
-			Confidence:     25,
+			Confidence:     25, // Low confidence for generic banner
 			ExtraData:      map[string]string{"raw_response_snippet": truncateString(string(buffer[:n]), 256)},
 		}
 	}
 	return nil
 }
 
+// detectServiceWithTimeout is the main exported function for service detection.
 func detectServiceWithTimeout(conn net.Conn, port int, protocol string, serviceDetectionTimeout time.Duration) *ServiceInfo {
 	defaultService, defaultVersion := detectServiceBasic(port, protocol)
 	result := &ServiceInfo{
@@ -725,7 +753,7 @@ func detectServiceWithTimeout(conn net.Conn, port int, protocol string, serviceD
 
 	if probeEngineInstance == nil || len(probeEngineInstance.probes) == 0 {
 		if probeEngineInstance == nil {
-			fmt.Fprintf(os.Stderr, "⚠️ Probe engine not initialized. Using basic service detection for %s:%d/%s.\n", conn.RemoteAddr().String(), port, protocol)
+			fmt.Fprintf(os.Stderr, "⚠️ Probe engine not initialized. Using basic service detection for port %d/%s.\n", port, protocol)
 		}
 		if strings.ToLower(protocol) == "tcp" && conn != nil {
 			if bannerResult := tryGenericBannerGrab(conn, port, serviceDetectionTimeout); bannerResult != nil {
@@ -838,8 +866,8 @@ var (
 		NmapResultsFile:      "",
 		OnlyOpenPorts:        true,
 		CVEPluginFile:        "",
-		PingSweep:            false,
-		ICMPSweep:            false, // New default
+		PingSweepTCP:         false,
+		PingSweepICMP:        false, // Default to false
 		PingSweepPorts:       "80,443,22,3389",
 		PingSweepTimeout:     300,
 		EnableMACLookup:      false,
@@ -850,7 +878,7 @@ var (
 	wg              sync.WaitGroup
 	sem             chan struct{}
 	scannedPorts    int64
-	activeHostPings int64
+	activeHostPings int64 // For ICMP sequence numbers or general tracking
 	vulnDB          = map[string][]string{
 		"http Apache 2.4.49": {"CVE-2021-41773", "CVE-2021-42013"},
 		"ssh OpenSSH 7.6":    {"CVE-2018-15473"},
@@ -860,12 +888,12 @@ var (
 	httpClient = &http.Client{Timeout: 10 * time.Second}
 	limiter    = rate.NewLimiter(rate.Every(30*time.Second/5), 5)
 	serviceToCPE = map[string]struct{ Vendor, Product string }{
-		"http":           {"apache", "http_server"}, // Changed from httpd
+		"http":           {"apache", "http_server"},
 		"https":            {"apache", "http_server"},
 		"http/2":         {"apache", "http_server"},
 		"nginx":          {"nginx", "nginx"},
 		"ssh":            {"openssh", "openssh"},
-		"ftp":            {"proftpd", "proftpd"}, // Example, could be vsftpd, pure-ftpd
+		"ftp":            {"proftpd", "proftpd"},
 		"mysql":          {"oracle", "mysql"},
 		"dns":            {"isc", "bind"},
 		"smtp":           {"postfix", "postfix"},
@@ -873,7 +901,7 @@ var (
 		"redis":          {"redis", "redis"},
 		"rdp":            {"microsoft", "remote_desktop_services"},
 		"ms-wbt-server":  {"microsoft", "remote_desktop_services"},
-		"microsoft-ds":   {"microsoft", "windows"}, // Generic, for SMB
+		"microsoft-ds":   {"microsoft", "windows"},
 		"netbios-ssn":    {"microsoft", "windows"},
 		"winrm":          {"microsoft", "windows_remote_management"},
 		"snmp":           {"net-snmp", "net-snmp"},
@@ -886,14 +914,14 @@ var (
 		"ldap":           {"openldap", "openldap"},
 		"ldaps":          {"openldap", "openldap"},
 		"vnc":            {"realvnc", "vnc"},
-		"telnet":         {"gnu", "inetutils"}, // Example for telnetd
+		"telnet":         {"gnu", "inetutils"},
 		"msrpc":          {"microsoft", "windows"},
 		"oracle":         {"oracle", "database"},
 		"mssql":          {"microsoft", "sql_server"},
 		"submission":     {"postfix", "postfix"},
 		"globalcatldap":  {"microsoft", "active_directory"},
 		"globalcatldaps": {"microsoft", "active_directory"},
-		"xmpp-client":    {"jabberd", "jabberd"}, // Example
+		"xmpp-client":    {"jabberd", "jabberd"},
 	}
 )
 
@@ -1088,8 +1116,8 @@ func configureSettings() {
 		fmt.Printf("12. Nmap Results File (Import):   %s\n", config.NmapResultsFile)
 		fmt.Printf("13. Display Only Open Ports:      %t\n", config.OnlyOpenPorts)
 		fmt.Printf("14. Custom CVE Plugin File:       %s\n", config.CVEPluginFile)
-		fmt.Printf("15. TCP Ping Sweep Enabled:       %t\n", config.PingSweep)
-		fmt.Printf("16. ICMP Ping Sweep Enabled:      %t\n", config.ICMPSweep)
+		fmt.Printf("15. TCP Ping Sweep Enabled:       %t\n", config.PingSweepTCP)
+		fmt.Printf("16. ICMP Ping Sweep Enabled:      %t\n", config.PingSweepICMP)
 		fmt.Printf("17. Ping Sweep Ports (TCP):       %s\n", config.PingSweepPorts)
 		fmt.Printf("18. Ping Sweep Timeout (ms):      %d\n", config.PingSweepTimeout)
 		fmt.Printf("19. MAC Lookup Enabled:           %t\n", config.EnableMACLookup)
@@ -1144,11 +1172,11 @@ func configureSettings() {
 		case 14:
 			config.CVEPluginFile = askForString("📄 New Custom CVE Plugin File Path (current: " + config.CVEPluginFile + "): ")
 		case 15:
-			tempBool = askForBool(fmt.Sprintf("📡 Enable TCP Ping Sweep? (current: %t, true/false): ", config.PingSweep))
-			config.PingSweep = tempBool
+			tempBool = askForBool(fmt.Sprintf("📡 Enable TCP Ping Sweep? (current: %t, true/false): ", config.PingSweepTCP))
+			config.PingSweepTCP = tempBool
 		case 16:
-			tempBool = askForBool(fmt.Sprintf("📡 Enable ICMP Ping Sweep? (current: %t, true/false): ", config.ICMPSweep))
-			config.ICMPSweep = tempBool
+			tempBool = askForBool(fmt.Sprintf("📡 Enable ICMP Ping Sweep? (current: %t, true/false): ", config.PingSweepICMP))
+			config.PingSweepICMP = tempBool
 		case 17:
 			config.PingSweepPorts = askForString(fmt.Sprintf("🎯 New Ping Sweep Ports (TCP) (current: %s): ", config.PingSweepPorts))
 		case 18:
@@ -1214,7 +1242,7 @@ func AttemptToGetMACAddress(ipAddr string, timeout time.Duration) string {
 			quickDialTimeout = 10 * time.Millisecond
 		}
 	}
-	tempConn, _ := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, "80"), quickDialTimeout)
+	tempConn, _ := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, "80"), quickDialTimeout) // Try to populate ARP cache
 	if tempConn != nil {
 		_ = tempConn.Close()
 	}
@@ -1348,39 +1376,44 @@ func parseSingleTarget(target string) []string {
 			if parsedIP := net.ParseIP(target); parsedIP != nil {
 				return []string{parsedIP.String()}
 			}
-			return []string{target}
+			// Attempt to resolve if it's a hostname with a CIDR-like suffix (e.g. example.com/24 - less common)
+			// For now, assume it's an invalid CIDR if ParseCIDR fails and it's not a plain IP.
+			// Or, resolve hostname then apply mask if possible (more complex, not implemented here for simplicity)
+			return []string{target} // Treat as a single target (hostname) if not a valid IP or CIDR
 		}
 
 		var ips []string
 		for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
 			ips = append(ips, ip.String())
-			if len(ips) >= 131072 {
+			if len(ips) >= 131072 { // Safety limit for very large CIDRs
 				fmt.Fprintf(os.Stderr, "⚠️  CIDR %s too large, limiting to %d IPs.\n", target, len(ips))
 				break
 			}
 		}
+		// Exclude network and broadcast addresses for common CIDR ranges
 		ones, bits := ipnet.Mask.Size()
-		if bits == 32 && ones > 0 && ones < 31 && len(ips) >= 2 {
-			if ips[0] == ipnet.IP.Mask(ipnet.Mask).String() {
+		if bits == 32 && ones > 0 && ones < 31 && len(ips) >= 2 { // Check for IPv4, not /31 or /32, and at least 2 IPs
+			if ips[0] == ipnet.IP.Mask(ipnet.Mask).String() { // Network address
 				ips = ips[1:]
 			}
-			if len(ips) > 0 {
+			if len(ips) > 0 { // Check again as ips might be empty now
 				broadcastIP := make(net.IP, len(ipnet.IP))
 				copy(broadcastIP, ipnet.IP)
 				for i := range ipnet.IP {
 					broadcastIP[i] = ipnet.IP[i] | ^ipnet.Mask[i]
 				}
-				if ips[len(ips)-1] == broadcastIP.String() {
+				if ips[len(ips)-1] == broadcastIP.String() { // Broadcast address
 					ips = ips[:len(ips)-1]
 				}
 			}
 		}
 		return ips
 	}
+	// If not CIDR, try to parse as single IP, else treat as hostname
 	if parsedIP := net.ParseIP(target); parsedIP != nil {
 		return []string{parsedIP.String()}
 	}
-	return []string{target}
+	return []string{target} // Treat as a hostname
 }
 
 func incIP(ip net.IP) {
@@ -1392,9 +1425,10 @@ func incIP(ip net.IP) {
 	}
 }
 
+// isHostAliveTCP performs TCP connect pings to specified ports
 func isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
 	if len(ports) == 0 {
-		ports = []int{80, 443} // Default to common ports if none specified
+		ports = []int{80, 443} // Default to common ports if none specified for TCP ping
 	}
 
 	var wgHostPing sync.WaitGroup
@@ -1420,8 +1454,8 @@ func isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
 					_ = conn.Close()
 					select {
 					case aliveChan <- true:
-						cancel()
-					case <-ctx.Done():
+						cancel() // Signal other goroutines to stop
+					case <-ctx.Done(): // Already cancelled
 					}
 				}
 			}
@@ -1431,18 +1465,19 @@ func isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
 	go func() {
 		wgHostPing.Wait()
 		select {
-		case aliveChan <- false:
-		case <-ctx.Done():
+		case aliveChan <- false: // No connection succeeded
+		case <-ctx.Done(): // Already determined (either true or timed out overall)
 		}
 	}()
 
 	return <-aliveChan
 }
 
+// isHostAliveICMP performs an ICMP echo request
 func isHostAliveICMP(host string, timeout time.Duration) bool {
 	targetIP := net.ParseIP(host)
 	if targetIP == nil {
-		addrs, err := net.LookupHost(host)
+		addrs, err := net.LookupHost(host) // Resolve hostname if not an IP
 		if err != nil || len(addrs) == 0 {
 			return false
 		}
@@ -1454,48 +1489,62 @@ func isHostAliveICMP(host string, timeout time.Duration) bool {
 
 	var conn *icmp.PacketConn
 	var err error
-	var proto int
 	var network string
+	var msgType icmp.Type
 
-	if targetIP.To4() != nil {
+	isIPv4 := targetIP.To4() != nil
+
+	if isIPv4 {
 		network = "ip4:icmp"
-		if runtime.GOOS == "windows" {
-			network = "udp4" // Windows unprivileged ICMP
+		if runtime.GOOS == "windows" { // For Windows unprivileged ICMP
+			network = "udp4"
 		}
-		proto = ipv4.ICMPTypeEcho.Protocol
+		msgType = ipv4.ICMPTypeEcho
 		conn, err = icmp.ListenPacket(network, "0.0.0.0")
 	} else {
 		network = "ip6:ipv6-icmp"
 		if runtime.GOOS == "windows" {
-			network = "udp6" // Windows unprivileged ICMP
+			network = "udp6"
 		}
-		proto = ipv6.ICMPTypeEchoRequest.Protocol
+		msgType = ipv6.ICMPTypeEchoRequest
 		conn, err = icmp.ListenPacket(network, "::")
 	}
 
 	if err != nil {
-		// fmt.Fprintf(os.Stderr, "ICMP Listen error for %s: %v (try running with sudo/admin privileges)\n", host, err)
+		// fmt.Fprintf(os.Stderr, "ICMP Listen error for %s (%s): %v (try running with sudo/admin privileges if using raw IP sockets)\n", host, network, err)
 		return false
 	}
 	defer conn.Close()
 
-	wm := icmp.Message{
-		Type: ipv4.ICMPTypeEcho, Code: 0,
+	msg := icmp.Message{
+		Type: msgType,
+		Code: 0,
 		Body: &icmp.Echo{
-			ID: os.Getpid() & 0xffff, Seq: int(atomic.AddInt64(&activeHostPings, 1) & 0xffff),
-			Data: []byte("r3cond0g-icmp"),
+			ID:   os.Getpid() & 0xffff,                                      // Process ID for Echo ID
+			Seq:  int(atomic.AddInt64(&activeHostPings, 1) & 0xffff), // Incrementing sequence number
+			Data: []byte(APP_NAME + "-ICMP"),
 		},
 	}
-	if targetIP.To4() == nil { // IPv6
-		wm.Type = ipv6.ICMPTypeEchoRequest
-	}
 
-	wb, err := wm.Marshal(nil)
+	msgBytes, err := msg.Marshal(nil)
 	if err != nil {
 		return false
 	}
 
-	if _, err := conn.WriteTo(wb, &net.UDPAddr{IP: targetIP}); err != nil {
+	var dst net.Addr
+	if isIPv4 {
+		dst = &net.IPAddr{IP: targetIP} // For ip4:icmp
+		if runtime.GOOS == "windows" {
+			dst = &net.UDPAddr{IP: targetIP, Port: 0} // For udp4
+		}
+	} else {
+		dst = &net.IPAddr{IP: targetIP} // For ip6:ipv6-icmp
+		if runtime.GOOS == "windows" {
+			dst = &net.UDPAddr{IP: targetIP, Port: 0} // For udp6
+		}
+	}
+
+	if _, err := conn.WriteTo(msgBytes, dst); err != nil {
 		return false
 	}
 
@@ -1506,12 +1555,17 @@ func isHostAliveICMP(host string, timeout time.Duration) bool {
 		return false
 	}
 
-	rm, err := icmp.ParseMessage(proto, rb[:n])
+	proto := ipv4.ICMPTypeEchoReply.Protocol // Default to 1 (ICMP for IPv4)
+	if !isIPv4 {
+		proto = ipv6.ICMPTypeEchoReply.Protocol // 58 (ICMPv6)
+	}
+
+	parsedMsg, err := icmp.ParseMessage(proto, rb[:n])
 	if err != nil {
 		return false
 	}
 
-	switch rm.Type {
+	switch parsedMsg.Type {
 	case ipv4.ICMPTypeEchoReply, ipv6.ICMPTypeEchoReply:
 		return true
 	default:
@@ -1519,30 +1573,34 @@ func isHostAliveICMP(host string, timeout time.Duration) bool {
 	}
 }
 
+// getUDPProbe returns a default probe payload for common UDP ports
 func getUDPProbe(port int) []byte {
 	switch port {
-	case 53:
+	case 53: // DNS
+		// Standard DNS query for example.com
 		return []byte{
 			0xAA, 0xBB, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x03, 'c', 'o', 'm', 0x00,
-			0x00, 0x01, 0x00, 0x01,
+			0x00, 0x01, 0x00, 0x01, // QTYPE A, QCLASS IN
 		}
-	case 123:
+	case 123: // NTP
+		// NTP v3 client request
 		return []byte{0x1B, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-	case 161:
+	case 161: // SNMP
+		// SNMPv1 GetRequest for sysDescr.0 (1.3.6.1.2.1.1.1.0) with community "public"
 		return []byte{
-			0x30, 0x26, 0x02, 0x01, 0x00,
-			0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c',
-			0xA0, 0x19,
-			0x02, 0x04, 0x01, 0x02, 0x03, 0x04,
-			0x02, 0x01, 0x00,
-			0x02, 0x01, 0x00,
-			0x30, 0x0B,
-			0x30, 0x09, 0x06, 0x05, 0x2B, 0x06, 0x01, 0x02, 0x01,
-			0x05, 0x00,
+			0x30, 0x26, 0x02, 0x01, 0x00, // SNMPv1
+			0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c', // Community
+			0xA0, 0x19, // GetRequest PDU
+			0x02, 0x04, 0x01, 0x02, 0x03, 0x04, // Request ID
+			0x02, 0x01, 0x00, // Error Status (noError)
+			0x02, 0x01, 0x00, // Error Index
+			0x30, 0x0B, // Variable Bindings
+			0x30, 0x09, 0x06, 0x05, 0x2B, 0x06, 0x01, 0x02, 0x01, // OID (sysDescr)
+			0x05, 0x00, // Value (Null)
 		}
 	default:
-		return []byte(APP_NAME + "UDPDiscovery")
+		return []byte(APP_NAME + "-UDPDiscovery-" + strconv.Itoa(port)) // Generic probe
 	}
 }
 
@@ -1694,13 +1752,13 @@ func queryNVD(cpe string) ([]string, error) {
 	currentRateLimit := limiter.Limit()
 	if config.NVDAPIKey != "" {
 		req.Header.Set("apiKey", config.NVDAPIKey)
-		if currentRateLimit < 1 {
-			limiter.SetLimit(rate.Every(30 * time.Second / 50))
+		if currentRateLimit < 1 { // If key provides higher rate, adjust limiter
+			limiter.SetLimit(rate.Every(30 * time.Second / 50)) // Example: 50 req per 30s with key
 			limiter.SetBurst(50)
 		}
-	} else {
-		if currentRateLimit > (rate.Every(30*time.Second/5) + 0.01) {
-			limiter.SetLimit(rate.Every(30 * time.Second / 5))
+	} else { // No key, ensure base rate
+		if currentRateLimit > (rate.Every(30*time.Second/5) + 0.01) { // If current rate is higher than base, reset to base
+			limiter.SetLimit(rate.Every(30 * time.Second / 5)) // 5 req per 30s without key
 			limiter.SetBurst(5)
 		}
 	}
@@ -1712,7 +1770,7 @@ func queryNVD(cpe string) ([]string, error) {
 			if attempt == maxRetries-1 {
 				return nil, fmt.Errorf("NVD request failed after %d retries: %w", maxRetries, err)
 			}
-			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second) // Exponential backoff
 			continue
 		}
 		body, readErr := io.ReadAll(resp.Body)
@@ -1737,22 +1795,22 @@ func queryNVD(cpe string) ([]string, error) {
 			}
 			return cves, nil
 		case http.StatusNotFound:
-			return []string{}, nil
+			return []string{}, nil // No CVEs found for this CPE
 		case http.StatusForbidden:
 			errorMsg := "NVD API request forbidden (403)"
 			if config.NVDAPIKey == "" {
 				errorMsg += " - an NVD API key is recommended."
 			} else {
-				errorMsg += " - check key/quota."
+				errorMsg += " - check your API key or NVD quota."
 			}
 			return nil, fmt.Errorf("%s Response: %s", errorMsg, string(body))
-		case http.StatusTooManyRequests:
+		case http.StatusTooManyRequests: // 429
 			retryAfterStr := resp.Header.Get("Retry-After")
-			waitTime := time.Duration(math.Pow(2, float64(attempt+1))) * time.Second
+			waitTime := time.Duration(math.Pow(2, float64(attempt+1))) * time.Second // Default backoff
 			if retryAfterSec, errConv := strconv.Atoi(retryAfterStr); errConv == nil {
 				waitTime = time.Duration(retryAfterSec) * time.Second
 			}
-			if waitTime > 60*time.Second {
+			if waitTime > 60*time.Second { // Cap wait time
 				waitTime = 60 * time.Second
 			}
 			fmt.Fprintf(os.Stderr, "⏳ NVD API rate limit hit (status %d). Waiting %v before retry %d/%d for %s\n", resp.StatusCode, waitTime, attempt+1, maxRetries, cpe)
@@ -1760,12 +1818,12 @@ func queryNVD(cpe string) ([]string, error) {
 			if attempt == maxRetries-1 {
 				return nil, fmt.Errorf("NVD rate limit exceeded after %d retries for %s. Body: %s", maxRetries, cpe, string(body))
 			}
-			continue
+			continue // Retry
 		default:
 			if attempt == maxRetries-1 {
 				return nil, fmt.Errorf("NVD API returned error %d for %s after %d retries. Body: %s", resp.StatusCode, cpe, maxRetries, string(body))
 			}
-			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second) // Backoff for other errors too
 		}
 	}
 	return nil, fmt.Errorf("NVD query failed after maximum retries for %s", cpe)
@@ -1790,12 +1848,13 @@ func findSimilarKey(key string) string {
 		if serviceName == dbServiceName {
 			currentSimilarity += 10
 		}
+		// Could add more complex similarity logic here (e.g., Levenshtein distance on versions)
 		if currentSimilarity > highestSimilarity {
 			highestSimilarity = currentSimilarity
 			bestMatch = dbKey
 		}
 	}
-	if highestSimilarity >= 10 {
+	if highestSimilarity >= 10 { // Threshold for similarity
 		return bestMatch
 	}
 	return ""
@@ -1823,32 +1882,148 @@ func loadCustomCVEs() {
 	fmt.Printf("✅ Loaded %d custom CVE mappings from %s\n", len(customCVEs), config.CVEPluginFile)
 }
 
+// scanTCPPort performs a TCP scan on a single port
+func scanTCPPort(host string, port int) *EnhancedScanResult {
+	startTime := time.Now()
+	address := fmt.Sprintf("%s:%d", host, port)
+	conn, err := net.DialTimeout("tcp", address, time.Duration(config.ScanTimeout)*time.Millisecond)
+	responseTime := time.Since(startTime)
+
+	if err != nil {
+		if !config.OnlyOpenPorts { // If we need to report closed/filtered ports
+			return &EnhancedScanResult{Host: host, Port: port, Protocol: "tcp", State: "closed/filtered", Timestamp: time.Now().UTC(), ResponseTime: responseTime}
+		}
+		return nil // Otherwise, only interested in open ports
+	}
+	defer conn.Close()
+
+	serviceDetectionTimeout := time.Duration(config.ServiceDetectTimeout) * time.Millisecond
+	serviceInfo := detectServiceWithTimeout(conn, port, "tcp", serviceDetectionTimeout)
+
+	result := &EnhancedScanResult{
+		Host:                host,
+		Port:                port,
+		Protocol:            "tcp",
+		State:               "open",
+		Service:             serviceInfo.ServiceName,
+		Version:             serviceInfo.ServiceVersion,
+		Timestamp:           time.Now().UTC(),
+		ResponseTime:        responseTime,
+		DetectionConfidence: serviceInfo.Confidence,
+		ALPNProtocol:        serviceInfo.ALPNProtocol,
+	}
+	if serviceInfo.TLSInfo != nil {
+		result.TLSCommonName = serviceInfo.TLSInfo.CommonName
+	}
+	result.OSGuess = guessOS(result) // OS Guessing based on combined info
+	return result
+}
+
+// scanUDPPort performs a UDP scan on a single port
+func scanUDPPort(host string, port int) *EnhancedScanResult {
+	startTime := time.Now()
+	address := fmt.Sprintf("%s:%d", host, port)
+
+	// For UDP, DialTimeout doesn't establish a connection but sets up the local side.
+	// The actual "connection" test happens with Write/Read.
+	conn, err := net.DialTimeout("udp", address, time.Duration(config.ScanTimeout)*time.Millisecond)
+	responseTime := time.Since(startTime)
+
+	if err != nil {
+		// Dial error for UDP is not as indicative as TCP. We might still try to probe.
+		// However, if Dial itself fails significantly, we can't proceed with probes that need conn.
+		// For now, if Dial fails, assume we can't probe.
+		if !config.OnlyOpenPorts {
+			return &EnhancedScanResult{Host: host, Port: port, Protocol: "udp", State: "dial_error/filtered", Timestamp: time.Now().UTC(), ResponseTime: responseTime}
+		}
+		return nil
+	}
+	defer conn.Close()
+
+	udpServiceDetectionTimeout := time.Duration(config.ServiceDetectTimeout) * time.Millisecond
+	if udpServiceDetectionTimeout <= 0 {
+		udpServiceDetectionTimeout = 2000 * time.Millisecond // Sensible default for UDP
+	}
+
+	// Use the probe engine for UDP as well
+	serviceInfo := detectServiceWithTimeout(conn, port, "udp", udpServiceDetectionTimeout)
+
+	state := "open|filtered" // Default for UDP if a response is elicited by probes
+	if serviceInfo.Confidence >= 50 { // Higher confidence from a probe might suggest "open"
+		state = "open"
+	}
+
+	// If no specific service was identified by probes, use basic port mapping if available.
+	if serviceInfo.ServiceName == "unknown" || serviceInfo.ServiceName == "" {
+		basicService, basicVersion := detectServiceBasic(port, "udp")
+		if basicService != "unknown" {
+			serviceInfo.ServiceName = basicService
+			serviceInfo.ServiceVersion = basicVersion
+			if serviceInfo.Confidence < 15 {
+				serviceInfo.Confidence = 15 // Slight boost for known UDP port if probe was weak
+			}
+		}
+	}
+	
+	// Decide whether to report this UDP result
+	// If OnlyOpenPorts is true, we need some positive indication.
+	// A non-default service name or higher confidence from probes, or being a common UDP port.
+	reportThisUDP := !config.OnlyOpenPorts ||
+		(serviceInfo.ServiceName != "unknown" && serviceInfo.ServiceName != "") ||
+		serviceInfo.Confidence >= 20 || // Moderate confidence from a probe
+		isCommonUDPPort(port)             // Always interesting if it's a common UDP port that responded
+
+	if !reportThisUDP {
+		return nil
+	}
+
+	result := &EnhancedScanResult{
+		Host:                host,
+		Port:                port,
+		Protocol:            "udp",
+		State:               state,
+		Service:             serviceInfo.ServiceName,
+		Version:             serviceInfo.ServiceVersion,
+		Timestamp:           time.Now().UTC(),
+		ResponseTime:        responseTime,
+		DetectionConfidence: serviceInfo.Confidence,
+		ALPNProtocol:        serviceInfo.ALPNProtocol, // Unlikely for UDP
+	}
+	if serviceInfo.TLSInfo != nil { // Very unlikely for UDP
+		result.TLSCommonName = serviceInfo.TLSInfo.CommonName
+	}
+	result.OSGuess = guessOS(result)
+	return result
+}
+
 func runUltraFastScan() []EnhancedScanResult {
 	fmt.Println("🚀 Starting Network Scan...")
 	results = nil
 	atomic.StoreInt64(&scannedPorts, 0)
-	atomic.StoreInt64(&activeHostPings, 0)
+	atomic.StoreInt64(&activeHostPings, 0) // Reset for ICMP sequence
+
 	initialHosts := parseTargets(config.TargetHost, config.TargetFile)
 	if len(initialHosts) == 0 {
 		fmt.Println("❌ No valid targets.")
 		return nil
 	}
-	var liveHosts []string
 
-	pingSweepActive := config.ICMPSweep || config.PingSweep
+	var liveHosts []string
+	pingSweepActive := config.PingSweepTCP || config.PingSweepICMP
+
 	if pingSweepActive {
 		sweepType := "TCP"
-		if config.ICMPSweep {
+		if config.PingSweepICMP {
 			sweepType = "ICMP"
 			if runtime.GOOS != "windows" && os.Geteuid() != 0 {
-				fmt.Println("⚠️ ICMP Ping Sweep may require root/administrator privileges for sending raw packets. Falling back to TCP Ping Sweep if ICMP fails due to permissions.")
+				fmt.Println("⚠️ ICMP Ping Sweep may require root/administrator privileges for sending raw packets. Falling back to TCP Ping Sweep if ICMP fails due to permissions or is disabled and TCP is also disabled.")
 			}
 		}
-		fmt.Printf("🔎 Performing %s Ping Sweep...\n", sweepType)
 
+		fmt.Printf("🔎 Performing %s Ping Sweep...\n", sweepType)
 		pingPortsToTry := parsePortRange(config.PingSweepPorts)
-		if len(pingPortsToTry) == 0 && config.PingSweep && !config.ICMPSweep { // TCP Ping needs ports
-			fmt.Println("⚠️ No valid TCP ping ports, defaulting.")
+		if len(pingPortsToTry) == 0 && config.PingSweepTCP && !config.PingSweepICMP { // TCP Ping needs ports if it's the only method
+			fmt.Println("⚠️ No valid TCP ping ports for TCP Ping Sweep, defaulting.")
 			pingPortsToTry = []int{80, 443, 22, 3389}
 		}
 		pingTimeout := time.Duration(config.PingSweepTimeout) * time.Millisecond
@@ -1859,14 +2034,11 @@ func runUltraFastScan() []EnhancedScanResult {
 		var pingWg sync.WaitGroup
 		var liveHostsMutex sync.Mutex
 		pingSemMax := config.MaxConcurrency
-		if pingSemMax > 200 {
-			pingSemMax = 200
-		}
-		if pingSemMax <= 0 {
-			pingSemMax = 50
-		}
+		if pingSemMax > 200 { pingSemMax = 200 }
+		if pingSemMax <= 0 { pingSemMax = 50 }
 		pingSem := make(chan struct{}, pingSemMax)
-		fmt.Printf("📡 Pinging %d hosts (timeout: %v, concurrency: %d)...\n", len(initialHosts), pingTimeout, pingSemMax)
+
+		fmt.Printf("📡 Pinging %d hosts (Method: %s, Timeout: %v, Concurrency: %d)...\n", len(initialHosts), sweepType, pingTimeout, pingSemMax)
 		var pingedCountAtomic int64
 		totalToPing := len(initialHosts)
 		pingProgressTicker := time.NewTicker(1 * time.Second)
@@ -1878,9 +2050,7 @@ func runUltraFastScan() []EnhancedScanResult {
 				select {
 				case <-pingProgressTicker.C:
 					current := atomic.LoadInt64(&pingedCountAtomic)
-					if totalToPing == 0 {
-						continue
-					}
+					if totalToPing == 0 { continue }
 					percentage := float64(current) / float64(totalToPing) * 100
 					liveHostsMutex.Lock()
 					foundLive := len(liveHosts)
@@ -1901,10 +2071,10 @@ func runUltraFastScan() []EnhancedScanResult {
 				pingSem <- struct{}{}
 				defer func() { <-pingSem }()
 				alive := false
-				if config.ICMPSweep {
+				if config.PingSweepICMP {
 					alive = isHostAliveICMP(h, pingTimeout)
 				}
-				if !alive && config.PingSweep { // Fallback or primary TCP ping
+				if !alive && config.PingSweepTCP { // Fallback or primary TCP ping
 					alive = isHostAliveTCP(h, pingPortsToTry, pingTimeout)
 				}
 
@@ -1919,7 +2089,7 @@ func runUltraFastScan() []EnhancedScanResult {
 		pingWg.Wait()
 		doneSignal <- true
 		pingProgressTicker.Stop()
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond) // Ensure final progress update flushes
 		finalLiveCount := len(liveHosts)
 		displayMutexPing.Lock()
 		fmt.Printf("\r\033[K📡 %s Ping Sweep Complete. Found %d live hosts from %d.\n", sweepType, finalLiveCount, totalToPing)
@@ -1929,7 +2099,7 @@ func runUltraFastScan() []EnhancedScanResult {
 			return nil
 		}
 	} else {
-		liveHosts = initialHosts
+		liveHosts = initialHosts // No ping sweep, scan all initial targets
 	}
 
 	hostsToScan := liveHosts
@@ -1942,11 +2112,13 @@ func runUltraFastScan() []EnhancedScanResult {
 		fmt.Println("❌ No live hosts to scan.")
 		return nil
 	}
+
 	totalScansPerProtocol := int64(len(hostsToScan) * len(portsToScan))
 	totalOperations := totalScansPerProtocol
 	if config.UDPScan {
 		totalOperations *= 2
 	}
+
 	fmt.Printf("📊 Port Scanning %d live hosts on %d ports. Total operations: ~%d\n", len(hostsToScan), len(portsToScan), totalOperations)
 	if totalOperations == 0 {
 		fmt.Println("ℹ️ No scan operations to perform.")
@@ -1959,19 +2131,19 @@ func runUltraFastScan() []EnhancedScanResult {
 			return nil
 		}
 	}
+
 	sem = make(chan struct{}, config.MaxConcurrency)
 	startScanTime := time.Now()
 	scanProgressTicker := time.NewTicker(1 * time.Second)
 	var displayMutexScan sync.Mutex
 	scanDoneSignal := make(chan bool)
+
 	go func() {
 		for {
 			select {
 			case <-scanProgressTicker.C:
 				current := atomic.LoadInt64(&scannedPorts)
-				if totalOperations == 0 {
-					continue
-				}
+				if totalOperations == 0 { continue }
 				if current > 0 {
 					percentage := float64(current) / float64(totalOperations) * 100
 					elapsed := time.Since(startScanTime)
@@ -1995,6 +2167,7 @@ func runUltraFastScan() []EnhancedScanResult {
 			}
 		}
 	}()
+
 	commonPorts := []int{80, 443, 21, 22, 23, 25, 53, 110, 135, 139, 143, 445, 993, 995, 1723, 3306, 3389, 5900, 5985, 8080}
 	priorityPorts, regularPorts := []int{}, []int{}
 	portSet := make(map[int]bool)
@@ -2004,25 +2177,30 @@ func runUltraFastScan() []EnhancedScanResult {
 	for _, p := range commonPorts {
 		if portSet[p] {
 			priorityPorts = append(priorityPorts, p)
-			delete(portSet, p)
+			delete(portSet, p) // Remove from set to avoid duplication
 		}
 	}
-	for p := range portSet {
+	for p := range portSet { // Add remaining non-common ports
 		regularPorts = append(regularPorts, p)
 	}
+	// For more predictable ordering if needed, sort regularPorts
+	// sort.Ints(regularPorts)
 	orderedPorts := append(priorityPorts, regularPorts...)
+
 	for _, host := range hostsToScan {
 		for _, port := range orderedPorts {
 			wg.Add(1)
 			go scanPortWithRecovery(host, port, &displayMutexScan)
 		}
 	}
+
 	wg.Wait()
 	scanDoneSignal <- true
 	scanProgressTicker.Stop()
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond) // Allow final progress to print
+
 	finalScannedCount := atomic.LoadInt64(&scannedPorts)
-	if finalScannedCount > totalOperations {
+	if finalScannedCount > totalOperations { // Cap at total expected if overshot due to race in progress display
 		finalScannedCount = totalOperations
 	}
 	mutex.Lock()
@@ -2031,11 +2209,13 @@ func runUltraFastScan() []EnhancedScanResult {
 	displayMutexScan.Lock()
 	fmt.Printf("\r\033[K🔍 Port Scan Complete: %d/%d operations performed. Found %d open/interesting ports/services.\n", finalScannedCount, totalOperations, finalOpenCount)
 	displayMutexScan.Unlock()
+
 	elapsedScanTime := time.Since(startScanTime)
 	fmt.Printf("✅ Port scan finished in %v\n", elapsedScanTime.Round(time.Second))
 	if totalOperations > 0 && elapsedScanTime.Seconds() > 0 {
 		fmt.Printf("⚡ Average scan rate: %.0f ops/s\n", float64(finalScannedCount)/elapsedScanTime.Seconds())
 	}
+
 	if finalOpenCount > 0 {
 		serviceCount := make(map[string]int)
 		for _, res := range results {
@@ -2049,6 +2229,7 @@ func runUltraFastScan() []EnhancedScanResult {
 		}
 		if len(serviceCount) > 0 {
 			fmt.Println("🎯 Top discovered services from open/open|filtered ports:")
+			// Could sort services by count here for better display
 			for service, count := range serviceCount {
 				fmt.Printf("    %s: %d\n", service, count)
 			}
@@ -2065,9 +2246,11 @@ func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
 			fmt.Fprintf(os.Stderr, "\n❌ CRITICAL PANIC during scan of %s:%d: %v. Recovered.\n", host, port, r)
 			displayMutex.Unlock()
 		}
-		<-sem
+		<-sem // Release semaphore slot
 	}()
-	sem <- struct{}{}
+
+	sem <- struct{}{} // Acquire semaphore slot
+
 	if resultTCP := scanTCPPort(host, port); resultTCP != nil {
 		if config.EnableMACLookup {
 			parsedIP := net.ParseIP(host)
@@ -2076,7 +2259,7 @@ func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
 				if mac != "" {
 					resultTCP.MACAddress = mac
 					resultTCP.MACVendor = LookupMACVendor(mac)
-					resultTCP.OSGuess = guessOS(resultTCP)
+					resultTCP.OSGuess = guessOS(resultTCP) // Re-guess OS with MAC info
 				}
 			}
 		}
@@ -2088,6 +2271,7 @@ func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
 		displayMutex.Unlock()
 	}
 	atomic.AddInt64(&scannedPorts, 1)
+
 	if config.UDPScan {
 		if resultUDP := scanUDPPort(host, port); resultUDP != nil {
 			if config.EnableMACLookup {
@@ -2097,7 +2281,7 @@ func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
 					if mac != "" {
 						resultUDP.MACAddress = mac
 						resultUDP.MACVendor = LookupMACVendor(mac)
-						resultUDP.OSGuess = guessOS(resultUDP)
+						resultUDP.OSGuess = guessOS(resultUDP) // Re-guess OS with MAC info
 					}
 				}
 			}
@@ -2110,119 +2294,6 @@ func scanPortWithRecovery(host string, port int, displayMutex *sync.Mutex) {
 		}
 		atomic.AddInt64(&scannedPorts, 1)
 	}
-}
-
-func scanTCPPort(host string, port int) *EnhancedScanResult {
-	startTime := time.Now()
-	address := fmt.Sprintf("%s:%d", host, port)
-	conn, err := net.DialTimeout("tcp", address, time.Duration(config.ScanTimeout)*time.Millisecond)
-	responseTime := time.Since(startTime)
-
-	if err != nil {
-		if !config.OnlyOpenPorts {
-			return &EnhancedScanResult{Host: host, Port: port, Protocol: "tcp", State: "closed/filtered", Timestamp: time.Now().UTC(), ResponseTime: responseTime}
-		}
-		return nil
-	}
-	defer conn.Close()
-
-	serviceDetectionTimeout := time.Duration(config.ServiceDetectTimeout) * time.Millisecond
-	serviceInfo := detectServiceWithTimeout(conn, port, "tcp", serviceDetectionTimeout)
-
-	result := &EnhancedScanResult{
-		Host:                host,
-		Port:                port,
-		Protocol:            "tcp",
-		State:               "open",
-		Service:             serviceInfo.ServiceName,
-		Version:             serviceInfo.ServiceVersion,
-		Timestamp:           time.Now().UTC(),
-		ResponseTime:        responseTime,
-		DetectionConfidence: serviceInfo.Confidence,
-		ALPNProtocol:        serviceInfo.ALPNProtocol,
-	}
-	if serviceInfo.TLSInfo != nil {
-		result.TLSCommonName = serviceInfo.TLSInfo.CommonName
-	}
-	result.OSGuess = guessOS(result)
-	return result
-}
-
-func scanUDPPort(host string, port int) *EnhancedScanResult {
-	startTime := time.Now()
-	address := fmt.Sprintf("%s:%d", host, port)
-	conn, err := net.DialTimeout("udp", address, time.Duration(config.ScanTimeout)*time.Millisecond)
-	responseTime := time.Since(startTime)
-
-	if err != nil {
-		// UDP dial errors are not reliable indicators of port state
-		if !config.OnlyOpenPorts {
-			// return &EnhancedScanResult{Host: host, Port: port, Protocol: "udp", State: "closed/filtered/error", Timestamp: time.Now().UTC(), ResponseTime: responseTime}
-		}
-		return nil // Can't proceed without a connection object for probes
-	}
-	defer conn.Close()
-
-	udpServiceDetectionTimeout := time.Duration(config.ServiceDetectTimeout) * time.Millisecond
-	if udpServiceDetectionTimeout <= 0 {
-		udpServiceDetectionTimeout = 2000 * time.Millisecond // Sensible default for UDP
-	}
-
-	serviceInfo := detectServiceWithTimeout(conn, port, "udp", udpServiceDetectionTimeout)
-
-	// If probe based detection yielded low confidence for UDP, we rely more on whether any response was received at all
-	// For UDP, even reaching this point (successful Dial, and probe execution attempt) can be an indicator
-	state := "open|filtered"
-	if serviceInfo.Confidence < 20 && serviceInfo.ServiceName == "unknown" { // if probe yielded nothing significant
-		// Did we send a payload and get *any* kind of response (even if not parsed by a specific probe)?
-		// The executeProbe logic implicitly handles this by returning nil or an error if no data
-		// is read when expected, or if read errors occur. If serviceInfo is non-nil, some interaction happened.
-		// If a basic port mapping exists, we prefer that.
-		basicService, basicVersion := detectServiceBasic(port, "udp")
-		if basicService != "unknown" {
-			serviceInfo.ServiceName = basicService
-			serviceInfo.ServiceVersion = basicVersion
-			if serviceInfo.Confidence < 15 {
-				serviceInfo.Confidence = 15 // Boost for known UDP port
-			}
-		} else if serviceInfo.Confidence < 10 { // if still unknown and very low confidence
-			// For UDP, if we just got "any" response back from our generic probe's SendPayload
-			// (if any was sent, or from `getUDPProbe`), it's a sign of life.
-			// This is tricky without knowing if probe sent anything. Assume if serviceInfo is non-nil, it means *something* happened.
-			state = "open|filtered (generic response)"
-		}
-	} else if serviceInfo.Confidence >= 20 {
-		state = "open" // Higher confidence from probe
-	}
-
-
-	// Only return if we have some indication of service or it's not "OnlyOpenPorts"
-	if config.OnlyOpenPorts && (serviceInfo.ServiceName == "unknown" && serviceInfo.Confidence < 15 && state == "open|filtered") {
-		// If we only care about definitively open ports and this is a weak "open|filtered" for an unknown service, skip.
-		// Unless it's a common UDP port, in which case, "open|filtered" is still interesting.
-		if !isCommonUDPPort(port) {
-			return nil
-		}
-	}
-
-
-	result := &EnhancedScanResult{
-		Host:                host,
-		Port:                port,
-		Protocol:            "udp",
-		State:               state,
-		Service:             serviceInfo.ServiceName,
-		Version:             serviceInfo.ServiceVersion,
-		Timestamp:           time.Now().UTC(),
-		ResponseTime:        responseTime,
-		DetectionConfidence: serviceInfo.Confidence,
-		ALPNProtocol:        serviceInfo.ALPNProtocol, // Unlikely for UDP but field exists
-	}
-	if serviceInfo.TLSInfo != nil { // Very unlikely for UDP but field exists
-		result.TLSCommonName = serviceInfo.TLSInfo.CommonName
-	}
-	result.OSGuess = guessOS(result)
-	return result
 }
 
 func validateConfig() bool {
@@ -2245,14 +2316,14 @@ func validateConfig() bool {
 	if config.ScanTimeout < 50 || config.ScanTimeout > 10000 {
 		fmt.Fprintf(os.Stderr, "⚠️ Configuration Warning: Scan connect timeout (%dms) is outside recommended range (50-10000ms).\n", config.ScanTimeout)
 	}
-	if config.ServiceDetectTimeout < 50 || config.ServiceDetectTimeout > 15000 { // Increased upper bound slightly
+	if config.ServiceDetectTimeout < 50 || config.ServiceDetectTimeout > 15000 { // Increased upper bound
 		fmt.Fprintf(os.Stderr, "⚠️ Configuration Warning: Service Detect timeout (%dms) is outside recommended range (50-15000ms).\n", config.ServiceDetectTimeout)
 	}
 	if config.MaxConcurrency < 1 || config.MaxConcurrency > 10000 {
 		fmt.Fprintf(os.Stderr, "⚠️ Configuration Warning: Max concurrency (%d) is outside recommended range (1-10000).\n", config.MaxConcurrency)
 	}
-	if config.PingSweep || config.ICMPSweep {
-		if config.PingSweep && !config.ICMPSweep && len(parsePortRange(config.PingSweepPorts)) == 0 { // TCP ping needs ports
+	if config.PingSweepTCP || config.PingSweepICMP { // If any ping sweep is enabled
+		if config.PingSweepTCP && !config.PingSweepICMP && len(parsePortRange(config.PingSweepPorts)) == 0 { // TCP ping specifically needs ports if it's the only method
 			fmt.Fprintf(os.Stderr, "❌ Configuration Error: TCP Ping sweep enabled, but no valid ping sweep ports are specified.\n")
 			isValid = false
 		}
@@ -2320,7 +2391,7 @@ func parseNmapResults() {
 			if addr.AddrType == "ipv4" {
 				hostIP = addr.Addr
 			}
-			if addr.AddrType == "ipv6" && hostIP == "" {
+			if addr.AddrType == "ipv6" && hostIP == "" { // Prefer IPv4 if available, else IPv6
 				hostIP = addr.Addr
 			}
 			if addr.AddrType == "mac" {
@@ -2331,12 +2402,12 @@ func parseNmapResults() {
 			}
 		}
 		if hostIP == "" {
-			continue
+			continue // Skip host if no IP found
 		}
 		for _, portEntry := range host.Ports.Ports {
 			isConsideredOpen := strings.ToLower(portEntry.State.State) == "open" || (portEntry.Protocol == "udp" && strings.Contains(strings.ToLower(portEntry.State.State), "open|filtered"))
 			if !config.OnlyOpenPorts || isConsideredOpen {
-				result := EnhancedScanResult{Host: hostIP, Port: portEntry.PortID, Protocol: portEntry.Protocol, State: portEntry.State.State, Service: portEntry.Service.Name, Version: strings.TrimSpace(portEntry.Service.Version), Timestamp: time.Now().UTC(), DetectionConfidence: 75}
+				result := EnhancedScanResult{Host: hostIP, Port: portEntry.PortID, Protocol: portEntry.Protocol, State: portEntry.State.State, Service: portEntry.Service.Name, Version: strings.TrimSpace(portEntry.Service.Version), Timestamp: time.Now().UTC(), DetectionConfidence: 75} // Nmap results are generally high confidence
 				if hostMAC != "" {
 					result.MACAddress = strings.ToUpper(hostMAC)
 					if macVendor != "" {
@@ -2345,7 +2416,7 @@ func parseNmapResults() {
 						result.MACVendor = LookupMACVendor(result.MACAddress)
 					}
 				}
-				result.OSGuess = guessOS(&result)
+				result.OSGuess = guessOS(&result) // Try to guess OS based on parsed info
 				newResults = append(newResults, result)
 				parsedCount++
 			}
@@ -2371,11 +2442,12 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 	}
 	serviceKey := strings.ToLower(strings.TrimSpace(result.Service))
 	versionKey := strings.TrimSpace(result.Version)
-	productKey := fmt.Sprintf("%s %s", result.Service, result.Version)
+	productKey := fmt.Sprintf("%s %s", result.Service, result.Version) // Case-sensitive for custom DB
 	if cves, found := customCVEs[productKey]; found {
 		result.Vulnerabilities = cves
 		return
 	}
+	// Fallback to case-insensitive for serviceKey with custom DB
 	lowerServiceProductKey := fmt.Sprintf("%s %s", serviceKey, strings.ToLower(versionKey))
 	if cves, found := customCVEs[lowerServiceProductKey]; found {
 		result.Vulnerabilities = cves
@@ -2387,9 +2459,9 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 		return
 	}
 	cpeInfo, cpeMapExists := serviceToCPE[serviceKey]
-	if !cpeMapExists {
+	if !cpeMapExists { // Try some common variations if exact match fails
 		if strings.Contains(serviceKey, "apache") && (strings.Contains(serviceKey, "httpd") || serviceKey == "http" || serviceKey == "https" || serviceKey == "http/2") {
-			cpeInfo = struct{ Vendor, Product string }{"apache", "http_server"}
+			cpeInfo = struct{ Vendor, Product string }{"apache", "http_server"} // Changed to http_server based on NVD common use
 			cpeMapExists = true
 		} else if strings.Contains(serviceKey, "openssh") {
 			cpeInfo = struct{ Vendor, Product string }{"openssh", "openssh"}
@@ -2397,7 +2469,7 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 		} else if strings.Contains(serviceKey, "nginx") {
 			cpeInfo = struct{ Vendor, Product string }{"nginx", "nginx"}
 			cpeMapExists = true
-		} else if strings.Contains(serviceKey, "mysql-server") || (serviceKey == "mysql" && strings.Contains(versionKey, "server")) { // Be more specific for mysql server
+		} else if strings.Contains(serviceKey, "mysql") { // Broad match for mysql
 			cpeInfo = struct{ Vendor, Product string }{"oracle", "mysql"} // or "mysql", "mysql"
 			cpeMapExists = true
 		} else if strings.Contains(serviceKey, "postgresql") {
@@ -2414,24 +2486,19 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 			return
 		}
 	}
+
 	cpeVersion := versionKey
-	if strings.HasPrefix(strings.ToLower(versionKey), cpeInfo.Product+" ") {
+	// Try to clean version string for CPE (this is heuristic)
+	if strings.HasPrefix(strings.ToLower(versionKey), cpeInfo.Product+" ") { // e.g. "MySQL Server 5.7.30"
 		cpeVersion = strings.TrimPrefix(strings.ToLower(versionKey), cpeInfo.Product+" ")
 	}
-	if idx := strings.Index(cpeVersion, " "); idx != -1 {
+	if idx := strings.Index(cpeVersion, " "); idx != -1 { // Remove extra info after version number, e.g., "5.7.30-log"
 		cpeVersion = cpeVersion[:idx]
 	}
-	if idx := strings.Index(cpeVersion, "("); idx != -1 {
+	if idx := strings.Index(cpeVersion, "("); idx != -1 { // Remove info in parentheses e.g. "8.0 (Ubuntu)"
 		cpeVersion = cpeVersion[:idx]
 	}
-	cpeVersion = strings.TrimSuffix(cpeVersion, "-patch")
-	// Further sanitize cpeVersion (e.g. remove build numbers if too specific)
-	versionParts := strings.Split(cpeVersion, ".")
-	if len(versionParts) > 2 { // Major.Minor.Patch - often NVD is for Major.Minor
-		// This can be risky, might lead to false positives. For now, use full version.
-		// cpeVersion = strings.Join(versionParts[:2], ".") // Example: use only Major.Minor
-	}
-
+	cpeVersion = strings.TrimSuffix(cpeVersion, "-patch") // Common suffix
 
 	cpeString := fmt.Sprintf("cpe:2.3:a:%s:%s:%s:*:*:*:*:*:*:*", cpeInfo.Vendor, cpeInfo.Product, strings.ToLower(cpeVersion))
 	nvdCacheKey := cpeString
@@ -2441,17 +2508,19 @@ func mapVulnerabilities(result *EnhancedScanResult) {
 			return
 		}
 	}
+
 	nvdCVEs, err := queryNVD(cpeString)
 	if err != nil {
 		result.Vulnerabilities = []string{fmt.Sprintf("NVD lookup error: %s", err.Error())}
-		nvdCache.Store(nvdCacheKey, result.Vulnerabilities)
+		nvdCache.Store(nvdCacheKey, result.Vulnerabilities) // Cache error to avoid re-querying failing CPEs
 		return
 	}
-	nvdCache.Store(nvdCacheKey, nvdCVEs)
+	nvdCache.Store(nvdCacheKey, nvdCVEs) // Cache successful (even if empty) result
+
 	if len(nvdCVEs) > 0 {
 		result.Vulnerabilities = nvdCVEs
-	} else {
-		fuzzyKey := fmt.Sprintf("%s %s", result.Service, versionKey)
+	} else { // If NVD returns no CVEs, try local DB with the more generic key
+		fuzzyKey := fmt.Sprintf("%s %s", result.Service, versionKey) // Original version string
 		if similar := findSimilarKey(fuzzyKey); similar != "" {
 			if localCVEs, found := vulnDB[similar]; found {
 				result.Vulnerabilities = append([]string{"(Local DB Match):"}, localCVEs...)
@@ -2481,12 +2550,15 @@ func performVulnerabilityMapping() {
 	var mappedCountAtomic int32
 	var wgVuln sync.WaitGroup
 	vulnSemMax := 10
-	if config.NVDAPIKey == "" {
+	if config.NVDAPIKey == "" { // Reduce concurrency if no API key to respect NVD rate limits
 		vulnSemMax = 2
 	}
 	vulnSem := make(chan struct{}, vulnSemMax)
+
+	// Operate on a copy to avoid race conditions if 'results' is modified elsewhere (though less likely here)
 	tempResults := make([]EnhancedScanResult, len(results))
 	copy(tempResults, results)
+
 	totalToMap := len(tempResults)
 	mapProgressTicker := time.NewTicker(1 * time.Second)
 	var displayMutexMap sync.Mutex
@@ -2518,10 +2590,10 @@ func performVulnerabilityMapping() {
 				defer wgVuln.Done()
 				vulnSem <- struct{}{}
 				defer func() { <-vulnSem }()
-				mapVulnerabilities(&tempResults[idx])
+				mapVulnerabilities(&tempResults[idx]) // Pass pointer to modify the item in tempResults
 				atomic.AddInt32(&mappedCountAtomic, 1)
 			}(i)
-		} else {
+		} else { // Even if not mapping, count it towards progress
 			atomic.AddInt32(&mappedCountAtomic, 1)
 		}
 	}
@@ -2529,17 +2601,17 @@ func performVulnerabilityMapping() {
 	wgVuln.Wait()
 	mapDoneSignal <- true
 	mapProgressTicker.Stop()
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond) // Ensure final progress update flushes
 
 	mutex.Lock()
-	results = tempResults
+	results = tempResults // Update global results with the mapped data
 	mutex.Unlock()
 
 	finalMappedCount := atomic.LoadInt32(&mappedCountAtomic)
 	displayMutexMap.Lock()
 	fmt.Printf("\r\033[K✅ Vuln mapping complete for %d results.\n", finalMappedCount)
 	displayMutexMap.Unlock()
-	displayResults()
+	displayResults() // Display updated results
 }
 
 func generateTopologyMap() {
@@ -2550,9 +2622,13 @@ func generateTopologyMap() {
 	fmt.Println("🌐 Generating topology map...")
 	var dotGraph strings.Builder
 	dotGraph.WriteString("digraph NetworkTopology {\n  rankdir=LR;\n  graph [bgcolor=\"#f0f0f0\"];\n  node [shape=Mrecord, style=\"rounded,filled\", fillcolor=\"#E6F5FF\", fontname=\"Arial\", fontsize=10];\n  edge [style=dashed, color=gray40, fontname=\"Arial\", fontsize=9];\n\n")
+
+	// Legend for OS colors
 	dotGraph.WriteString("  subgraph cluster_legend {\n    label=\"Legend\";\n    style=filled;\n    color=lightgrey;\n    node [style=filled, shape=box];\n    Windows_Legend [label=\"Windows Host\", fillcolor=\"#add8e6\"];\n    Linux_Legend [label=\"Linux Host\", fillcolor=\"#90ee90\"];\n    Network_Legend [label=\"Network Device\", fillcolor=\"#f0e68c\"];\n    Unknown_Legend [label=\"Unknown OS Host\", fillcolor=\"#E6F5FF\"];\n  }\n\n")
-	hostServices := make(map[string]map[string][]string)
-	hostOSMap := make(map[string]string)
+
+	hostServices := make(map[string]map[string][]string) // host -> service -> []port/proto
+	hostOSMap := make(map[string]string)                // host -> OSGuess
+
 	for _, result := range results {
 		isConsideredOpen := strings.ToLower(result.State) == "open" || (result.Protocol == "udp" && strings.Contains(strings.ToLower(result.State), "open|filtered"))
 		if isConsideredOpen {
@@ -2561,36 +2637,43 @@ func generateTopologyMap() {
 			}
 			serviceKey := result.Service
 			if serviceKey == "" || serviceKey == "unknown" {
-				serviceKey = fmt.Sprintf("port_%d", result.Port)
+				serviceKey = fmt.Sprintf("port_%d", result.Port) // Use port as key if service is unknown
 			}
 			portProto := fmt.Sprintf("%d/%s", result.Port, result.Protocol)
 			hostServices[result.Host][serviceKey] = append(hostServices[result.Host][serviceKey], portProto)
-			if _, ok := hostOSMap[result.Host]; !ok && result.OSGuess != "" && result.OSGuess != "Unknown" {
+
+			// Store the most confident OS guess for the host
+			if _, ok := hostOSMap[result.Host]; !ok || (result.OSGuess != "" && result.OSGuess != "Unknown") {
+				// This logic might need refinement if multiple OS guesses exist for a host.
+				// For now, first non-unknown guess is taken or overwritten if a more specific one comes later.
 				hostOSMap[result.Host] = result.OSGuess
 			}
 		}
 	}
+
 	for host, servicesMap := range hostServices {
 		var serviceDetails []string
 		for service, portsProtos := range servicesMap {
 			serviceDetails = append(serviceDetails, fmt.Sprintf("<%s> %s: %s", sanitizeForDotID(service), service, strings.Join(portsProtos, ", ")))
 		}
-		nodeID := sanitizeForDotID(host)
+		nodeID := sanitizeForDotID(host) // Ensure hostnames/IPs are valid DOT IDs
 		label := fmt.Sprintf("{ %s | { %s } }", host, strings.Join(serviceDetails, " | "))
-		nodeColor := "#E6F5FF"
+
+		nodeColor := "#E6F5FF" // Default color
 		osGuessLower := strings.ToLower(hostOSMap[host])
 		if strings.Contains(osGuessLower, "windows") {
-			nodeColor = "#add8e6"
+			nodeColor = "#add8e6" // Light Blue for Windows
 		}
 		if strings.Contains(osGuessLower, "linux") {
-			nodeColor = "#90ee90"
+			nodeColor = "#90ee90" // Light Green for Linux
 		}
 		if strings.Contains(osGuessLower, "cisco") || strings.Contains(osGuessLower, "juniper") || strings.Contains(osGuessLower, "fortinet") || strings.Contains(osGuessLower, "router") {
-			nodeColor = "#f0e68c"
+			nodeColor = "#f0e68c" // Khaki for Network Devices
 		}
 		dotGraph.WriteString(fmt.Sprintf("  \"%s\" [id=\"node_%s\" label=\"%s\" fillcolor=\"%s\"];\n", nodeID, nodeID, label, nodeColor))
 	}
 	dotGraph.WriteString("}\n")
+
 	filename := fmt.Sprintf("%s_topology.dot", strings.ReplaceAll(config.OutputFile, ".", "_"))
 	if err := os.WriteFile(filename, []byte(dotGraph.String()), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed to write topology DOT file '%s': %v\n", filename, err)
@@ -2601,13 +2684,19 @@ func generateTopologyMap() {
 }
 
 func sanitizeForDotID(input string) string {
+	// Replace characters not allowed in DOT IDs or that cause issues
 	sanitized := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
 			return r
 		}
-		return '_'
+		return '_' // Replace invalid chars with underscore
 	}, input)
+
+	// DOT IDs cannot start with a number unless quoted, but Mrecord labels make this complex.
+	// Prepending a letter if it starts with a digit and is a simple IP/version-like string.
 	if len(sanitized) > 0 && (sanitized[0] >= '0' && sanitized[0] <= '9') {
+		// Check if it's a common IP-like or version-like string (e.g., 1.2.3.4 or 2.4.1)
+		// A simple check: if it only contains digits and dots.
 		isPurelyNumericOrSimpleVersion := true
 		for _, char := range sanitized {
 			if !((char >= '0' && char <= '9') || char == '.') {
@@ -2616,7 +2705,7 @@ func sanitizeForDotID(input string) string {
 			}
 		}
 		if isPurelyNumericOrSimpleVersion {
-			return "p_" + sanitized
+			return "p_" + sanitized // Prepend "p_"
 		}
 	}
 	return sanitized
@@ -2664,6 +2753,7 @@ func displayResults() {
 	fmt.Printf("%-20s %-8s %-8s %-15s %-20s %-25s %-18s %-15s %s\n", "Host", "Port", "Proto", "State", "Service", "Version", "OS Guess", "MAC Vendor", "Vulnerabilities")
 	fmt.Println("-----------------------------------------------------------------------------------------------------------------------")
 
+	// Sort results for consistent display
 	sort.SliceStable(results, func(i, j int) bool {
 		if results[i].Host != results[j].Host {
 			return results[i].Host < results[j].Host
@@ -2673,10 +2763,10 @@ func displayResults() {
 
 	for _, r := range results {
 		if config.OnlyOpenPorts && !(strings.ToLower(r.State) == "open" || strings.Contains(strings.ToLower(r.State), "open|filtered")) {
-			continue
+			continue // Skip if not open and OnlyOpenPorts is true
 		}
 		vulns := strings.Join(r.Vulnerabilities, ", ")
-		if len(vulns) > 30 {
+		if len(vulns) > 30 { // Truncate long vulnerability strings for display
 			vulns = vulns[:27] + "..."
 		}
 		if vulns == "" && config.VulnMapping {
@@ -2710,6 +2800,7 @@ func exportResults() {
 	currentResults := make([]EnhancedScanResult, len(results))
 	copy(currentResults, results)
 	mutex.Unlock()
+
 	if len(currentResults) == 0 {
 		fmt.Println("❌ No results to export.")
 		return
@@ -2719,19 +2810,19 @@ func exportResults() {
 	choice := getUserChoice()
 	switch choice {
 	case 1:
-		exportJSON(currentResults) // This mainly re-saves if filename is different or confirms default save
+		exportJSONOut(currentResults) // Use a different name to avoid conflict with default save
 	case 2:
-		exportCSV(currentResults)
+		exportCSVOut(currentResults)
 	case 3:
-		exportXML(currentResults)
+		exportXMLOut(currentResults)
 	case 4:
-		exportHTML(currentResults)
+		exportHTMLOut(currentResults)
 	default:
 		fmt.Println("❌ Invalid export format choice.")
 	}
 }
 
-func exportJSON(data []EnhancedScanResult) {
+func exportJSONOut(data []EnhancedScanResult) {
 	filename := askForString(fmt.Sprintf("Enter JSON filename (default: %s_export.json): ", config.OutputFile))
 	if filename == "" {
 		filename = fmt.Sprintf("%s_export.json", config.OutputFile)
@@ -2748,7 +2839,7 @@ func exportJSON(data []EnhancedScanResult) {
 	fmt.Printf("✅ JSON data exported to %s\n", filename)
 }
 
-func exportCSV(data []EnhancedScanResult) {
+func exportCSVOut(data []EnhancedScanResult) {
 	filename := askForString(fmt.Sprintf("Enter CSV filename (default: %s_export.csv): ", config.OutputFile))
 	if filename == "" {
 		filename = fmt.Sprintf("%s_export.csv", config.OutputFile)
@@ -2760,60 +2851,90 @@ func exportCSV(data []EnhancedScanResult) {
 	}
 	defer file.Close()
 
-	writer := bufio.NewWriter(file)
-	_, _ = writer.WriteString("Host,Port,Protocol,State,Service,Version,OSGuess,MACAddress,MACVendor,Vulnerabilities,Timestamp\n")
-	for _, r := range data {
-		vulns := strings.ReplaceAll(strings.Join(r.Vulnerabilities, ";"), ",", "_") // CSV-safe vulnerabilities
-		line := fmt.Sprintf("\"%s\",%d,\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",
-			r.Host, r.Port, r.Protocol, r.State, r.Service, r.Version, r.OSGuess, r.MACAddress, r.MACVendor, vulns, r.Timestamp.Format(time.RFC3339))
-		_, _ = writer.WriteString(line)
+	writer := csv.NewWriter(file) // Using encoding/csv for proper CSV handling
+	defer writer.Flush()
+
+	headers := []string{"Host", "Port", "Protocol", "State", "Service", "Version", "OSGuess", "MACAddress", "MACVendor", "Vulnerabilities", "Timestamp", "ResponseTime", "ALPNProtocol", "TLSCommonName", "DetectionConfidence"}
+	if err := writer.Write(headers); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Error writing CSV headers: %v\n", err)
+		return
 	}
-	_ = writer.Flush()
+
+	for _, r := range data {
+		vulns := strings.Join(r.Vulnerabilities, "; ") // Use semicolon for multi-value within a cell
+		record := []string{
+			r.Host,
+			strconv.Itoa(r.Port),
+			r.Protocol,
+			r.State,
+			r.Service,
+			r.Version,
+			r.OSGuess,
+			r.MACAddress,
+			r.MACVendor,
+			vulns,
+			r.Timestamp.Format(time.RFC3339),
+			r.ResponseTime.String(),
+			r.ALPNProtocol,
+			r.TLSCommonName,
+			strconv.Itoa(r.DetectionConfidence),
+		}
+		if err := writer.Write(record); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Error writing CSV record for host %s: %v\n", r.Host, err)
+			continue
+		}
+	}
 	fmt.Printf("✅ CSV data exported to %s\n", filename)
 }
 
-func exportXML(data []EnhancedScanResult) {
+type XMLResults struct { // Define a root element for valid XML
+	XMLName xml.Name             `xml:"ScanResults"`
+	Results []EnhancedScanResult `xml:"Result"`
+}
+
+func exportXMLOut(data []EnhancedScanResult) {
 	filename := askForString(fmt.Sprintf("Enter XML filename (default: %s_export.xml): ", config.OutputFile))
 	if filename == "" {
 		filename = fmt.Sprintf("%s_export.xml", config.OutputFile)
 	}
 
-	type ResultsXML struct {
-		XMLName xml.Name             `xml:"ScanResults"`
-		Results []EnhancedScanResult `xml:"Result"`
-	}
-	xmlData, err := xml.MarshalIndent(ResultsXML{Results: data}, "", "  ")
+	xmlData, err := xml.MarshalIndent(XMLResults{Results: data}, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error marshaling to XML: %v\n", err)
 		return
 	}
-	if err := os.WriteFile(filename, xmlData, 0644); err != nil {
+	// Add XML header for completeness
+	finalXMLData := append([]byte(xml.Header), xmlData...)
+	if err := os.WriteFile(filename, finalXMLData, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error writing XML to file '%s': %v\n", filename, err)
 		return
 	}
 	fmt.Printf("✅ XML data exported to %s\n", filename)
 }
 
-const htmlTemplate = `
+const htmlTemplateContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>ReconRaptor Scan Results</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
-        h1 { text-align: center; color: #333; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; box-shadow: 0 2px 15px rgba(0,0,0,0.1); background-color: #fff; }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background-color: #4CAF50; color: white; }
-        tr:nth-child(even) { background-color: #f2f2f2; }
-        tr:hover { background-color: #ddd; }
-        .container { padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; background-color: #f0f2f5; color: #333; }
+        .container { max-width: 95%; margin: 20px auto; padding: 20px; background-color: #fff; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #2c3e50; margin-bottom: 25px; font-size: 2em; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 0.9em; }
+        th, td { padding: 12px 15px; text-align: left; border: 1px solid #ddd; word-wrap: break-word; }
+        th { background-color: #3498db; color: white; font-weight: bold; position: sticky; top: 0; z-index: 10;}
+        tr:nth-child(even) { background-color: #f8f9fa; }
+        tr:hover { background-color: #e9ecef; }
+        .footer { text-align: center; margin-top: 30px; font-size: 0.8em; color: #7f8c8d; }
+		.vuln-list { list-style-type: none; padding-left: 0; margin: 0;}
+		.vuln-list li { padding: 2px 0;}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>ReconRaptor Scan Results</h1>
+        <h1>ReconRaptor Scan Results 🦅</h1>
         <table>
             <thead>
                 <tr>
@@ -2826,7 +2947,11 @@ const htmlTemplate = `
                     <th>OS Guess</th>
                     <th>MAC Vendor</th>
                     <th>Vulnerabilities</th>
-                    <th>Timestamp</th>
+                    <th>Timestamp (UTC)</th>
+                    <th>Resp. Time</th>
+                    <th>ALPN</th>
+                    <th>TLS CN</th>
+                    <th>Confidence</th>
                 </tr>
             </thead>
             <tbody>
@@ -2840,18 +2965,31 @@ const htmlTemplate = `
                     <td>{{.Version}}</td>
                     <td>{{.OSGuess}}</td>
                     <td>{{.MACVendor}}</td>
-                    <td>{{join .Vulnerabilities ", "}}</td>
+                    <td>
+						{{if .Vulnerabilities}}
+						<ul class="vuln-list">
+							{{range .Vulnerabilities}}<li>{{.}}</li>{{end}}
+						</ul>
+						{{else}}N/A{{end}}
+					</td>
                     <td>{{.Timestamp.Format "2006-01-02 15:04:05"}}</td>
+                    <td>{{.ResponseTime}}</td>
+                    <td>{{.ALPNProtocol}}</td>
+                    <td>{{.TLSCommonName}}</td>
+                    <td>{{.DetectionConfidence}}%</td>
                 </tr>
                 {{end}}
             </tbody>
         </table>
     </div>
+    <div class="footer">
+        Report generated by ReconRaptor v` + VERSION + ` on ` + time.Now().Format("2006-01-02 15:04:05 MST") + `
+    </div>
 </body>
 </html>
 `
 
-func exportHTML(data []EnhancedScanResult) {
+func exportHTMLOut(data []EnhancedScanResult) {
 	filename := askForString(fmt.Sprintf("Enter HTML filename (default: %s_export.html): ", config.OutputFile))
 	if filename == "" {
 		filename = fmt.Sprintf("%s_export.html", config.OutputFile)
@@ -2863,7 +3001,13 @@ func exportHTML(data []EnhancedScanResult) {
 	}
 	defer file.Close()
 
-	tmpl, err := template.New("scanResults").Funcs(template.FuncMap{"join": strings.Join}).Parse(htmlTemplate)
+	// Updated template function map if needed
+	funcMap := template.FuncMap{
+		"join": strings.Join,
+		// Add other custom functions for the template if necessary
+	}
+
+	tmpl, err := template.New("scanResults").Funcs(funcMap).Parse(htmlTemplateContent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error parsing HTML template: %v\n", err)
 		return
@@ -2902,14 +3046,14 @@ func loadConfigFromEnv() {
 			config.ServiceDetectTimeout = val
 		}
 	}
-	if valStr := os.Getenv("R3COND0G_PING_SWEEP"); valStr != "" {
+	if valStr := os.Getenv("R3COND0G_PING_SWEEP_TCP"); valStr != "" { // Changed from R3COND0G_PING_SWEEP
 		if val, err := strconv.ParseBool(valStr); err == nil {
-			config.PingSweep = val
+			config.PingSweepTCP = val
 		}
 	}
-	if valStr := os.Getenv("R3COND0G_ICMP_SWEEP"); valStr != "" {
+	if valStr := os.Getenv("R3COND0G_PING_SWEEP_ICMP"); valStr != "" { // New env var for ICMP
 		if val, err := strconv.ParseBool(valStr); err == nil {
-			config.ICMPSweep = val
+			config.PingSweepICMP = val
 		}
 	}
 	if val := os.Getenv("R3COND0G_PING_PORTS"); val != "" {
@@ -2945,8 +3089,8 @@ func parseCommandLineFlags() {
 	flag.StringVar(&config.NmapResultsFile, "nmap-file", config.NmapResultsFile, "Path to Nmap XML results file to import and process")
 	flag.BoolVar(&config.OnlyOpenPorts, "open-only", config.OnlyOpenPorts, "Display and process only 'open' or 'open|filtered' ports")
 	flag.StringVar(&config.CVEPluginFile, "cve-plugin", config.CVEPluginFile, "Path to a custom JSON file for CVE mappings")
-	flag.BoolVar(&config.PingSweep, "ping-sweep", config.PingSweep, "Enable TCP ping sweep to find live hosts before port scanning")
-	flag.BoolVar(&config.ICMPSweep, "icmp-sweep", config.ICMPSweep, "Enable ICMP ping sweep (requires privileges for raw sockets on non-Windows)")
+	flag.BoolVar(&config.PingSweepTCP, "tcp-ping", config.PingSweepTCP, "Enable TCP ping sweep to find live hosts before port scanning")    // Renamed flag
+	flag.BoolVar(&config.PingSweepICMP, "icmp-ping", config.PingSweepICMP, "Enable ICMP ping sweep (requires privileges for raw sockets on non-Windows)") // New flag
 	flag.StringVar(&config.PingSweepPorts, "ping-ports", config.PingSweepPorts, "Ports to use for TCP ping sweep (e.g., 80,443,22)")
 	flag.IntVar(&config.PingSweepTimeout, "ping-timeout", config.PingSweepTimeout, "Timeout in milliseconds for ping sweep attempts per port/host")
 	flag.BoolVar(&config.EnableMACLookup, "mac-lookup", config.EnableMACLookup, "Attempt MAC address lookup for hosts on the local network (experimental)")
@@ -2959,13 +3103,14 @@ func parseCommandLineFlags() {
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -target 192.168.1.0/24 -ports 1-1024 -icmp-sweep -vuln -mac-lookup\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -target 192.168.1.0/24 -ports 1-1024 -icmp-ping -vuln -mac-lookup\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -target example.com -ports top100 -tcp-ping -ping-ports 80,443\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -target-file hosts.txt -ports 80,443,8000-8080 -udp -output company_scan\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -nmap-file nmap_results.xml -vuln -nvd-key YOUR_NVD_API_KEY\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s (runs in interactive mode if no direct action flags are provided)\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "For NVD API key, visit: https://nvd.nist.gov/developers/request-an-api-key\n")
 		fmt.Fprintf(os.Stderr, "Ensure 'tcp_probes.json' and 'udp_probes.json' (or custom specified files via --probe-files) are present for enhanced service detection.\n")
-		fmt.Fprintf(os.Stderr, "ICMP Ping Sweep (-icmp-sweep) might require administrator/root privileges.\n")
+		fmt.Fprintf(os.Stderr, "ICMP Ping Sweep (-icmp-ping) might require administrator/root privileges.\n")
 	}
 	flag.Parse()
 }
@@ -2976,7 +3121,7 @@ func performIPSweepAndSave() {
 		fmt.Println("❌ No targets configured. Please configure targets first (Menu Option 2 or CLI).")
 		return
 	}
-	atomic.StoreInt64(&activeHostPings, 0)
+	atomic.StoreInt64(&activeHostPings, 0) // Reset ICMP sequence counter
 	initialHosts := parseTargets(config.TargetHost, config.TargetFile)
 	if len(initialHosts) == 0 {
 		fmt.Println("❌ No valid targets found for sweep.")
@@ -2985,68 +3130,78 @@ func performIPSweepAndSave() {
 
 	var liveHosts []string
 	pingPortsToTry := parsePortRange(config.PingSweepPorts)
-	if len(pingPortsToTry) == 0 && config.PingSweep && !config.ICMPSweep {
-		fmt.Println("⚠️ No valid TCP ping ports, defaulting to 80,443.")
-		pingPortsToTry = []int{80, 443}
-	}
 	pingTimeout := time.Duration(config.PingSweepTimeout) * time.Millisecond
 	if pingTimeout <= 0 {
 		fmt.Println("⚠️ Invalid ping timeout, defaulting to 300ms.")
 		pingTimeout = 300 * time.Millisecond
 	}
 
-	sweepType := "TCP"
-	if config.ICMPSweep {
-		sweepType = "ICMP"
+	sweepMethodSelected := false
+	var effectiveSweepType string
+
+	if config.PingSweepICMP {
+		effectiveSweepType = "ICMP"
+		sweepMethodSelected = true
 		if runtime.GOOS != "windows" && os.Geteuid() != 0 {
-			fmt.Println("⚠️ ICMP Ping Sweep may require root/administrator privileges for sending raw packets. Results might be incomplete.")
+			fmt.Println("⚠️ ICMP Ping Sweep may require root/administrator privileges. Results might be incomplete if privileges are insufficient.")
 		}
-	} else if !config.PingSweep { // Neither ICMP nor TCP ping selected
-		fmt.Println("ℹ️ No ping sweep method (ICMP or TCP) selected. Defaulting to TCP ping on common ports.")
-		config.PingSweep = true // Enable TCP ping as a fallback for IP sweep mode
+	}
+	if config.PingSweepTCP { // Can be primary or fallback
+		if !sweepMethodSelected { // If ICMP wasn't chosen, TCP is primary
+			effectiveSweepType = "TCP"
+		} else {
+			effectiveSweepType += "+TCP" // ICMP primary, TCP as fallback/additional
+		}
+		sweepMethodSelected = true
 		if len(pingPortsToTry) == 0 {
-			pingPortsToTry = []int{80,443,22}
+			fmt.Println("⚠️ No valid TCP ping ports for TCP Ping Sweep, defaulting to 80,443.")
+			pingPortsToTry = []int{80, 443}
 		}
 	}
 
+	if !sweepMethodSelected { // Neither explicitly selected
+		fmt.Println("ℹ️ No specific ping sweep method (ICMP or TCP) selected for IP Sweep. Defaulting to ICMP, then TCP ping on common ports.")
+		config.PingSweepICMP = true // Default to trying ICMP first
+		config.PingSweepTCP = true  // Then TCP
+		effectiveSweepType = "ICMP+TCP"
+		if len(pingPortsToTry) == 0 {
+			pingPortsToTry = []int{80, 443, 22}
+		}
+	}
 
 	var pingWg sync.WaitGroup
 	var liveHostsMutex sync.Mutex
 	pingSemMax := config.MaxConcurrency
-	if pingSemMax > 200 {
-		pingSemMax = 200
-	}
-	if pingSemMax <= 0 {
-		pingSemMax = 50
-	}
+	if pingSemMax > 200 { pingSemMax = 200 }
+	if pingSemMax <= 0 { pingSemMax = 50 }
 	pingSem := make(chan struct{}, pingSemMax)
-	fmt.Printf("📡 Pinging %d hosts (Method: %s, Timeout: %v, Concurrency: %d)...\n", len(initialHosts), sweepType, pingTimeout, pingSemMax)
+	fmt.Printf("📡 Pinging %d hosts (Method: %s, Timeout: %v, Concurrency: %d)...\n", len(initialHosts), effectiveSweepType, pingTimeout, pingSemMax)
 
 	var pingedCountAtomic int64
 	totalToPing := len(initialHosts)
 	pingProgressTicker := time.NewTicker(1 * time.Second)
 	var displayMutexPing sync.Mutex
 	doneSignal := make(chan bool)
+
 	go func() {
 		for {
 			select {
 			case <-pingProgressTicker.C:
 				current := atomic.LoadInt64(&pingedCountAtomic)
-				if totalToPing == 0 {
-					continue
-				}
+				if totalToPing == 0 { continue }
 				percentage := float64(current) / float64(totalToPing) * 100
 				liveHostsMutex.Lock()
 				foundLive := len(liveHosts)
 				liveHostsMutex.Unlock()
 				displayMutexPing.Lock()
-				fmt.Printf("\r\033[K📡 IP Sweep (%s): %d/%d (%.1f%%) | Live: %d", sweepType, current, totalToPing, percentage, foundLive)
+				fmt.Printf("\r\033[K📡 IP Sweep (%s): %d/%d (%.1f%%) | Live: %d", effectiveSweepType, current, totalToPing, percentage, foundLive)
 				displayMutexPing.Unlock()
 			case <-doneSignal:
 				return
 			}
 		}
 	}()
+
 	for _, host := range initialHosts {
 		pingWg.Add(1)
 		go func(h string) {
@@ -3054,10 +3209,10 @@ func performIPSweepAndSave() {
 			pingSem <- struct{}{}
 			defer func() { <-pingSem }()
 			alive := false
-			if config.ICMPSweep {
+			if config.PingSweepICMP {
 				alive = isHostAliveICMP(h, pingTimeout)
 			}
-			if !alive && config.PingSweep { // Fallback or primary TCP ping
+			if !alive && config.PingSweepTCP { // Fallback or primary TCP ping
 				alive = isHostAliveTCP(h, pingPortsToTry, pingTimeout)
 			}
 			if alive {
@@ -3074,11 +3229,13 @@ func performIPSweepAndSave() {
 	time.Sleep(150 * time.Millisecond)
 	finalLiveCount := len(liveHosts)
 	displayMutexPing.Lock()
-	fmt.Printf("\r\033[K📡 IP Sweep (%s) Complete. Found %d live hosts out of %d.\n", sweepType, finalLiveCount, totalToPing)
+	fmt.Printf("\r\033[K📡 IP Sweep (%s) Complete. Found %d live hosts out of %d.\n", effectiveSweepType, finalLiveCount, totalToPing)
 	displayMutexPing.Unlock()
 
 	if finalLiveCount > 0 {
 		fmt.Println("\n📢 Live Hosts Found:")
+		// Sort live hosts for cleaner output
+		sort.Strings(liveHosts)
 		for i, host := range liveHosts {
 			fmt.Printf("  %d. %s\n", i+1, host)
 		}
