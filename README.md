@@ -1,9 +1,9 @@
-# r3cond0g (RECONRAPTOR) 🦅
+# r3cond0g (RekkonHound) 🦅
 ### *Hunt. Scan. Conquer.*
 
 <div align="center">
   
-[![Version](https://img.shields.io/badge/Version-0.2.3-red.svg?style=for-the-badge&logo=github)](https://github.com/0xb0rn3/r3cond0g)
+[![Version](https://img.shields.io/badge/Version-0.2.4-red.svg?style=for-the-badge&logo=github)](https://github.com/0xb0rn3/r3cond0g)
 [![Go Version](https://img.shields.io/badge/Go-1.18+-00ADD8.svg?style=for-the-badge&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/0xb0rn3/r3cond0g/go.yml?branch=main&style=for-the-badge&logo=github-actions)](https://github.com/0xb0rn3/r3cond0g/actions)
