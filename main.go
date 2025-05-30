@@ -879,10 +879,62 @@ var (
 	sem             chan struct{}
 	scannedPorts    int64
 	activeHostPings int64 // For ICMP sequence numbers or general tracking
-	vulnDB          = map[string][]string{
-		"http Apache 2.4.49": {"CVE-2021-41773", "CVE-2021-42013"},
-		"ssh OpenSSH 7.6":    {"CVE-2018-15473"},
-	}
+	var vulnDB = map[string][]string{
+    // Apache HTTPD 2.4.x vulnerabilities (from oldest to newest CVE):
+    "Apache HTTPD 2.4.44":  {"CVE-2020-9490"},
+    "Apache HTTPD 2.4.48":  {"CVE-2019-17567"},
+    "Apache HTTPD 2.4.50":  {"CVE-2021-41524"},
+    "Apache HTTPD 2.4.53":  {"CVE-2022-22719"},
+    "Apache HTTPD 2.4.54":  {"CVE-2022-26377", "CVE-2022-28330", "CVE-2022-28614", "CVE-2022-28615"},
+    "Apache HTTPD 2.4.56":  {"CVE-2023-25690"},
+    "Apache HTTPD 2.4.58":  {"CVE-2023-31122", "CVE-2023-43622", "CVE-2023-45802"},
+    "Apache HTTPD 2.4.59":  {"CVE-2023-38709"},
+    "Apache HTTPD 2.4.60":  {"CVE-2024-38472", "CVE-2024-38473", "CVE-2024-38474", "CVE-2024-38475", "CVE-2024-38476", "CVE-2024-38477", "CVE-2024-39573"},
+
+    // OpenSSH vulnerabilities (fixed-in versions):
+    "OpenSSH 7.8p1": {"CVE-2018-15473"},
+    "OpenSSH 7.9p1": {"CVE-2019-6110", "CVE-2019-6111"},
+    "OpenSSH 8.5":   {"CVE-2021-28041"},
+    "OpenSSH 9.2":   {"CVE-2023-25136"},
+    "OpenSSH 9.3p2": {"CVE-2023-38408"},
+    "OpenSSH 9.6":   {"CVE-2023-51767"},
+    "OpenSSH 10.0":  {"CVE-2025-32728"},
+
+    // Samba vulnerabilities (fixed-in versions):
+    "Samba 4.9.13":  {"CVE-2019-10197"},
+    "Samba 4.16.10": {"CVE-2023-0225", "CVE-2023-0614", "CVE-2023-0922"},
+    "Samba 4.17.7":  {"CVE-2023-0225", "CVE-2023-0614", "CVE-2023-0922"},
+    "Samba 4.18.5":  {"CVE-2022-2127", "CVE-2023-3347", "CVE-2023-34966", "CVE-2023-34967", "CVE-2023-34968"},
+    "Samba 4.19.1":  {"CVE-2023-3961", "CVE-2023-4091", "CVE-2023-4154", "CVE-2023-42669", "CVE-2023-42670"},
+
+    // Nginx vulnerabilities:
+    "Nginx 1.6.1":   {"CVE-2014-3556"},
+    "Nginx 1.6.2":   {"CVE-2014-3616"},
+    "Nginx 1.9.10":  {"CVE-2016-0742", "CVE-2016-0746", "CVE-2016-0747"},
+    "Nginx 1.11.1":  {"CVE-2016-4450"},
+    "Nginx 1.13.3":  {"CVE-2017-7529"},
+    "Nginx 1.15.6":  {"CVE-2018-16843", "CVE-2018-16844", "CVE-2018-16845"},
+    "Nginx 1.17.3":  {"CVE-2019-9513", "CVE-2019-9516"},
+
+    // MySQL vulnerabilities (examples):
+    "MySQL 5.7.31": {"CVE-2018-2562"},
+    "MySQL 8.0.22": {"CVE-2020-2578", "CVE-2020-2621"},
+
+    // PHP vulnerabilities:
+    "PHP 7.4.28":  {"CVE-2021-21708"},
+    "PHP 8.0.30":  {"CVE-2023-3824"},
+
+    // OpenSSL vulnerabilities:
+    "OpenSSL 1.0.1g": {"CVE-2014-0160"},
+    "OpenSSL 1.0.2o": {"CVE-2018-0739"},
+    "OpenSSL 1.1.1d": {"CVE-2019-1547"},
+    "OpenSSL 1.1.1i": {"CVE-2020-1971"},
+
+    // PostgreSQL vulnerabilities:
+    "PostgreSQL 15.4": {"CVE-2023-39418"},
+    "PostgreSQL 15.11": {"CVE-2025-1094"},
+}
+
 	nvdCache   = sync.Map{}
 	customCVEs = make(map[string][]string)
 	httpClient = &http.Client{Timeout: 10 * time.Second}
