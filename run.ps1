@@ -5,61 +5,101 @@ param(
     [string[]]$ToolArgs
 )
 
-$Config = @{
-    RepoUrl = "https://github.com/0xb0rn3/r3cond0g.git"
-    RepoName = "r3cond0g"
-    ToolExecutableName = "r3cond0g.exe"
-    MainGoFile = "main.go"
-    DesktopPath = [Environment]::GetFolderPath("Desktop")
+$RepoUrl = "https://github.com/0xb0rn3/r3cond0g.git"
+$DesktopPath = [Environment]::GetFolderPath("Desktop")
+$ProjectPath = Join-Path $DesktopPath "ReconRaptor"
+
+function Request-ExecutionPermission {
+    $currentPolicy = Get-ExecutionPolicy -Scope CurrentUser
+    if ($currentPolicy -eq "Restricted" -or $currentPolicy -eq "AllSigned") {
+        Write-Host "Requesting execution permission..." -ForegroundColor Yellow
+        try {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+            Write-Host "Execution policy updated." -ForegroundColor Green
+        }
+        catch {
+            Write-Host "Failed to set execution policy. Please run as administrator." -ForegroundColor Red
+            exit 1
+        }
+    }
 }
 
-Write-Host "ReconRaptor Setup - Requesting Permission" -ForegroundColor Cyan
-$permission = Read-Host "Do you want to proceed with setup? (Y/N)"
-if ($permission -notmatch '^[Yy]') {
-    Write-Host "Setup cancelled." -ForegroundColor Red
-    exit 1
+function Install-Dependencies {
+    $dependencies = @(
+        @{Name = "Git"; Command = "git"; WingetId = "Git.Git"; ChocoName = "git"},
+        @{Name = "Go"; Command = "go"; WingetId = "GoLang.Go"; ChocoName = "golang"}
+    )
+    
+    foreach ($dep in $dependencies) {
+        if (-not (Get-Command $dep.Command -ErrorAction SilentlyContinue)) {
+            Write-Host "Installing $($dep.Name)..." -ForegroundColor Yellow
+            
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                winget install --id $dep.WingetId -e --accept-package-agreements --accept-source-agreements --silent | Out-Null
+            }
+            elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+                choco install $dep.ChocoName -y | Out-Null
+            }
+            else {
+                Write-Host "$($dep.Name) installation failed. Install manually." -ForegroundColor Red
+                exit 1
+            }
+            
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+            Start-Sleep 2
+            
+            if (-not (Get-Command $dep.Command -ErrorAction SilentlyContinue)) {
+                Write-Host "$($dep.Name) not found after installation." -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
 }
 
-$workDir = Join-Path $Config.DesktopPath "ReconRaptor"
-if (-not (Test-Path $workDir)) {
-    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
-}
-Set-Location $workDir
-
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "Git not found. Install Git and retry." -ForegroundColor Red
-    exit 1
-}
-
-if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    Write-Host "Go not found. Install Go and retry." -ForegroundColor Red
-    exit 1
-}
-
-if (-not (Test-Path $Config.RepoName)) {
+function Setup-Project {
+    if (Test-Path $ProjectPath) {
+        Remove-Item $ProjectPath -Recurse -Force
+    }
+    
+    New-Item -ItemType Directory -Path $ProjectPath -Force | Out-Null
+    Set-Location $ProjectPath
+    
     Write-Host "Cloning repository..." -ForegroundColor Yellow
-    git clone $Config.RepoUrl $Config.RepoName 2>&1 | Out-Null
+    git clone $RepoUrl . 2>&1 | Out-Null
+    
+    if (-not (Test-Path "main.go")) {
+        Write-Host "Repository clone failed." -ForegroundColor Red
+        exit 1
+    }
 }
 
-Set-Location $Config.RepoName
-
-if (Test-Path "go.mod") {
+function Build-Tool {
+    Write-Host "Initializing Go module..." -ForegroundColor Yellow
+    go mod init r3cond0g 2>&1 | Out-Null
     go mod tidy 2>&1 | Out-Null
+    
+    Write-Host "Compiling..." -ForegroundColor Yellow
+    go build -ldflags="-s -w" -o r3cond0g.exe main.go 2>&1 | Out-Null
+    
+    if (-not (Test-Path "r3cond0g.exe")) {
+        Write-Host "Compilation failed." -ForegroundColor Red
+        exit 1
+    }
 }
 
-Write-Host "Compiling..." -ForegroundColor Yellow
-go build -ldflags="-s -w" -o $Config.ToolExecutableName $Config.MainGoFile 2>&1 | Out-Null
-
-if (-not (Test-Path $Config.ToolExecutableName)) {
-    Write-Host "Compilation failed." -ForegroundColor Red
-    exit 1
+function Run-Tool {
+    Write-Host "Launching ReconRaptor..." -ForegroundColor Green
+    Write-Host "Project location: $ProjectPath" -ForegroundColor Cyan
+    
+    if ($ToolArgs) {
+        & ".\r3cond0g.exe" @ToolArgs
+    } else {
+        & ".\r3cond0g.exe"
+    }
 }
 
-Write-Host "Launching ReconRaptor..." -ForegroundColor Green
-if ($ToolArgs) {
-    & ".\$($Config.ToolExecutableName)" @ToolArgs
-} else {
-    & ".\$($Config.ToolExecutableName)"
-}
-
-Write-Host "Setup complete. Files located at: $workDir" -ForegroundColor Green
+Request-ExecutionPermission
+Install-Dependencies
+Setup-Project
+Build-Tool
+Run-Tool
