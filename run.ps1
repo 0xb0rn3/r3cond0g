@@ -1,82 +1,58 @@
 #Requires -Version 5.1
 
-param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$ToolArgs
-)
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$ToolArgs)
 
-$ErrorActionPreference = "SilentlyContinue"
-
-if ((Get-ExecutionPolicy) -eq 'Restricted') {
-    Write-Host "Setting execution policy..." -ForegroundColor Yellow
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Start-Process PowerShell -Verb RunAs "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$pwd'; & '$PSCommandPath' $args`""; exit
 }
 
-$DesktopPath = [Environment]::GetFolderPath("Desktop")
-$ProjectPath = Join-Path $DesktopPath "ReconRaptor"
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 
-if (Test-Path $ProjectPath) {
-    Remove-Item $ProjectPath -Recurse -Force
-}
-New-Item -ItemType Directory -Path $ProjectPath -Force | Out-Null
-Set-Location $ProjectPath
-
-Write-Host "Installing dependencies..." -ForegroundColor Green
-
-if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing winget..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile "winget.msixbundle"
-    Add-AppxPackage -Path "winget.msixbundle" -Force
-    Remove-Item "winget.msixbundle" -Force
-}
+$desktopPath = [Environment]::GetFolderPath("Desktop")
+$workDir = Join-Path $desktopPath "ReconRaptor"
+New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+Set-Location $workDir
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Git..." -ForegroundColor Yellow
-    winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements --silent
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Git.Git -e --accept-package-agreements --accept-source-agreements --force | Out-Null
+    } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+        choco install git -y --force | Out-Null
+    }
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    Start-Sleep -Seconds 5
 }
 
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Go..." -ForegroundColor Yellow
-    winget install --id GoLang.Go -e --source winget --accept-package-agreements --accept-source-agreements --silent
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id GoLang.Go -e --accept-package-agreements --accept-source-agreements --force | Out-Null
+    } elseif (Get-Command choco -ErrorAction SilentlyContinue) {
+        choco install golang -y --force | Out-Null
+    }
     $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    Start-Sleep -Seconds 5
 }
 
-Write-Host "Cloning repository..." -ForegroundColor Green
-git clone https://github.com/0xb0rn3/r3cond0g.git . --quiet
-
-if (-not (Test-Path "main.go")) {
-    Write-Host "Repository structure error" -ForegroundColor Red
-    exit 1
+if (-not (Test-Path ".git") -or -not (Test-Path "main.go")) {
+    if (Test-Path ".git") { Remove-Item -Recurse -Force .git }
+    git clone https://github.com/0xb0rn3/r3cond0g.git . --force 2>&1 | Out-Null
 }
 
-Write-Host "Setting up Go module..." -ForegroundColor Green
-go mod init r3cond0g
-go mod tidy
+if (-not (Test-Path "go.mod")) {
+    go mod init r3cond0g 2>&1 | Out-Null
+}
 
-Write-Host "Compiling binary..." -ForegroundColor Green
-$buildProcess = Start-Process -FilePath "go" -ArgumentList "build", "-ldflags=-s -w", "-o", "r3cond0g.exe", "main.go" -NoNewWindow -PassThru -Wait
+go mod tidy 2>&1 | Out-Null
 
-if ($buildProcess.ExitCode -ne 0) {
+if (Test-Path "r3cond0g.exe") { Remove-Item "r3cond0g.exe" -Force }
+
+go build -ldflags="-s -w" -o r3cond0g.exe main.go
+
+if (Test-Path "r3cond0g.exe") {
+    if ($ToolArgs) {
+        & ".\r3cond0g.exe" @ToolArgs
+    } else {
+        & ".\r3cond0g.exe"
+    }
+} else {
     Write-Host "Compilation failed" -ForegroundColor Red
     exit 1
 }
-
-if (-not (Test-Path "r3cond0g.exe")) {
-    Write-Host "Binary not found after compilation" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Launching ReconRaptor..." -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Magenta
-
-if ($ToolArgs) {
-    & ".\r3cond0g.exe" @ToolArgs
-} else {
-    & ".\r3cond0g.exe"
-}
-
-Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Magenta
-Write-Host "Execution completed. Files located at: $ProjectPath" -ForegroundColor Green
