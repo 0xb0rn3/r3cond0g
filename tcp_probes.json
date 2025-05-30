@@ -51,7 +51,7 @@
   {
     "name": "SMTP-Banner-Grab",
     "protocol": "TCP",
-    "ports": [25, 587], /* Port 465 (smtps) would typically have requires_tls: true */
+    "ports": [25, 587],
     "priority": 10,
     "requires_tls": false,
     "send_payload": "",
@@ -231,9 +231,9 @@
   {
     "name": "SIP-OPTIONS-Probe-TCP",
     "protocol": "TCP",
-    "ports": [5060, 5061], /* 5061 for SIPS often requires TLS */
+    "ports": [5060, 5061],
     "priority": 15,
-    "requires_tls": false, /* This specific probe is for non-TLS SIP. A separate SIPS probe would set true */
+    "requires_tls": false,
     "send_payload": "OPTIONS sip:{{TARGET_HOST}} SIP/2.0\\r\\nVia: SIP/2.0/TCP {{TARGET_HOST}};branch=z9hG4bKReconRaptor\\r\\nFrom: <sip:probe@{{TARGET_HOST}}>;tag=reconraptor\\r\\nTo: <sip:service@{{TARGET_HOST}}>\\r\\nCall-ID: reconraptor@{{TARGET_HOST}}\\r\\nCSeq: 1 OPTIONS\\r\\nMax-Forwards: 70\\r\\nUser-Agent: r3cond0g/0.2.3\\r\\nContent-Length: 0\\r\\n\\r\\n",
     "read_pattern": "(?im)^(?:Server|User-Agent):\\s*([^\\r\\n]+)",
     "service_override": "sip",
@@ -257,7 +257,7 @@
     "protocol": "TCP",
     "ports": [5222, 5269],
     "priority": 15,
-    "requires_tls": false, /* XMPP often uses STARTTLS, so initial connect is non-TLS */
+    "requires_tls": false,
     "send_payload": "<?xml version='1.0'?><stream:stream to='{{TARGET_HOST}}' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>",
     "read_pattern": "from=['\"]([^'\"]+)['\"].*?version=['\"]([^'\"]+)['\"]",
     "service_override": "xmpp",
@@ -265,26 +265,26 @@
     "timeout_ms": 4000
   },
   {
-    "name": "RDP-Initial-Connect", /* Just checks for RDP negotiation, not full version */
+    "name": "RDP-Initial-Connect",
     "protocol": "TCP",
     "ports": [3389],
     "priority": 10,
     "requires_tls": false,
-    "send_payload": "\\x03\\x00\\x00\\x13\\x0e\\xe0\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x08\\x00\\x03\\x00\\x00\\x00", /* X.224 Connection Request */
-    "read_pattern": "\\x03\\x00\\x00\\x13\\x0e\\xd0\\x00\\x00", /* Expected start of X.224 Connection Confirm */
-    "service_override": "ms-wbt-server", /* RDP */
+    "send_payload": "\\x03\\x00\\x00\\x13\\x0e\\xe0\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x08\\x00\\x03\\x00\\x00\\x00",
+    "read_pattern": "\\x03\\x00\\x00\\x13\\x0e\\xd0\\x00\\x00",
+    "service_override": "ms-wbt-server",
     "version_template": "RDP Connection Confirm",
     "timeout_ms": 3000
   },
   {
     "name": "Generic-TCP-Fallback-Banner",
     "protocol": "TCP",
-    "ports": [], /* Empty means it can apply to any port if no other probe matches */
-    "priority": 1000, /* Very low priority */
+    "ports": [],
+    "priority": 1000,
     "requires_tls": false,
-    "send_payload": "", /* Just read what's there */
-    "read_pattern": "^([^\\r\\n]{5,100})$", /* Capture a reasonably sized first line */
-    "service_override": "", /* Let service be 'unknown' or derived by basic port mapping */
+    "send_payload": "",
+    "read_pattern": "^([^\\r\\n]{5,100})$",
+    "service_override": "",
     "version_template": "banner: {{group_1}}",
     "timeout_ms": 2000
   }
