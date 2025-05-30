@@ -6,7 +6,7 @@
     "priority": 10,
     "requires_tls": false,
     "send_payload": "\\x00\\x1e\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07version\\x04bind\\x00\\x00\\x10\\x00\\x03",
-    "read_pattern": "([0-9]+\\.[0-9]+(?:\\.[0-9]+)?[^\\x00\\s]*)", /* Capture version string */
+    "read_pattern": "([0-9]+\\.[0-9]+(?:\\.[0-9]+)?[^\\x00\\s]*)",
     "service_override": "dns",
     "version_template": "BIND {{group_1}}",
     "timeout_ms": 3000
@@ -15,10 +15,10 @@
     "name": "DNS-Query-Standard-UDP",
     "protocol": "UDP",
     "ports": [53],
-    "priority": 20, /* Lower priority than specific version query */
+    "priority": 20,
     "requires_tls": false,
     "send_payload": "\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x03www\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01",
-    "read_pattern": "\\x12\\x34\\x81\\x80", /* Check for standard response flags (QR=1, RCODE=0) */
+    "read_pattern": "\\x12\\x34\\x81\\x80",
     "service_override": "dns",
     "version_template": "Standard DNS Response",
     "timeout_ms": 2000
@@ -29,23 +29,20 @@
     "ports": [161],
     "priority": 10,
     "requires_tls": false,
-    /* SNMPv1 GetRequest for sysDescr.0 (1.3.6.1.2.1.1.1.0) with community "public" */
     "send_payload": "\\x30\\x26\\x02\\x01\\x00\\x04\\x06\\x70\\x75\\x62\\x6c\\x69\\x63\\xa0\\x19\\x02\\x04\\x00\\x00\\x00\\x01\\x02\\x01\\x00\\x02\\x01\\x00\\x30\\x0b\\x30\\x09\\x06\\x05\\x2b\\x06\\x01\\x02\\x01\\x01\\x01\\x00\\x05\\x00",
-    "read_pattern": "\\x04\\x20([\\x00-\\xff]+)", /* Crude: Find OctetString (0x04), length (0x20 is example), then capture. Needs refinement. */
-                                               /* A more precise ASN.1 parser or regex for sysDescr value is needed for reliable version. */
-                                               /* For now, this might capture a chunk of the response. */
+    "read_pattern": "\\x04\\x20([\\x00-\\xff]+)",
     "service_override": "snmp",
-    "version_template": "v1 sysDescr: {{group_1}}", /* Will be hex if not printable */
+    "version_template": "v1 sysDescr: {{group_1}}",
     "timeout_ms": 3000
   },
   {
-    "name": "NTP-Control-Query-UDP", /* Mode 6, Version 2, request to read variables */
+    "name": "NTP-Control-Query-UDP",
     "protocol": "UDP",
     "ports": [123],
     "priority": 10,
     "requires_tls": false,
     "send_payload": "\\x16\\x02\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00",
-    "read_pattern": ".", /* Any response indicates NTP. Detailed version parsing is complex. */
+    "read_pattern": ".",
     "service_override": "ntp",
     "version_template": "NTP daemon response",
     "timeout_ms": 2000
@@ -53,24 +50,23 @@
   {
     "name": "DHCP-Discover-UDP",
     "protocol": "UDP",
-    "ports": [67], /* Probing DHCP server */
+    "ports": [67],
     "priority": 10,
     "requires_tls": false,
-    /* Minimal DHCP Discover packet */
     "send_payload": "\\x01\\x01\\x06\\x00\\x12\\x34\\x56\\x78\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x63\\x82\\x53\\x63\\x35\\x01\\x01\\xff",
-    "read_pattern": "\\x02\\x01\\x06\\x00\\x12\\x34\\x56\\x78", /* Check for DHCPOFFER (op=2) with same XID */
+    "read_pattern": "\\x02\\x01\\x06\\x00\\x12\\x34\\x56\\x78",
     "service_override": "dhcp",
     "version_template": "DHCP Offer Received",
     "timeout_ms": 3000
   },
   {
-    "name": "TFTP-Read-Request-UDP", /* Attempt to read a non-existent short file */
+    "name": "TFTP-Read-Request-UDP",
     "protocol": "UDP",
     "ports": [69],
     "priority": 10,
     "requires_tls": false,
     "send_payload": "\\x00\\x01probe.txt\\x00octet\\x00",
-    "read_pattern": "\\x00\\x05\\x00\\x01", /* Check for TFTP Error Code 1 (File not found) */
+    "read_pattern": "\\x00\\x05\\x00\\x01",
     "service_override": "tftp",
     "version_template": "TFTP Error (File Not Found)",
     "timeout_ms": 2000
@@ -81,21 +77,20 @@
     "ports": [137],
     "priority": 10,
     "requires_tls": false,
-    /* NBSTAT Query for '*' (any name) */
     "send_payload": "\\x80\\xf0\\x00\\x10\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x20\\x43\\x4b\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x00\\x00\\x21\\x00\\x01",
-    "read_pattern": "\\x80\\xf0\\x84\\x00", /* Check for positive name query response */
+    "read_pattern": "\\x80\\xf0\\x84\\x00",
     "service_override": "netbios-ns",
     "version_template": "NetBIOS Name Service Response",
     "timeout_ms": 2000
   },
   {
-    "name": "mDNS-Query-UDP", /* Query for _services._dns-sd._udp.local */
+    "name": "mDNS-Query-UDP",
     "protocol": "UDP",
     "ports": [5353],
     "priority": 10,
     "requires_tls": false,
     "send_payload": "\\x00\\x00\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x09_services\\x07_dns-sd\\x04_udp\\x05local\\x00\\x00\\x0c\\x00\\x01",
-    "read_pattern": ".", /* Any response indicates mDNS listener */
+    "read_pattern": ".",
     "service_override": "mdns",
     "version_template": "Multicast DNS Response",
     "timeout_ms": 2000
@@ -113,16 +108,15 @@
     "timeout_ms": 4000
   },
   {
-    "name": "Syslog-Test-Message-UDP", /* Syslog usually doesn't respond */
+    "name": "Syslog-Test-Message-UDP",
     "protocol": "UDP",
     "ports": [514],
     "priority": 15,
     "requires_tls": false,
     "send_payload": "<13>May 30 01:00:00 r3cond0g r3cond0g_probe: This is a test syslog message from r3cond0g",
-    "read_pattern": "^$", /* Expect no response, or ICMP port unreachable if closed */
-                         /* This probe is more for presence check if no ICMP error comes back quickly */
+    "read_pattern": "^$",
     "service_override": "syslog",
     "version_template": "Potentially Listening (No Response Expected)",
-    "timeout_ms": 1000 /* Short timeout, as no response is typical */
+    "timeout_ms": 1000
   }
 ]
