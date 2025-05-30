@@ -53,7 +53,7 @@ type Config struct {
 	OnlyOpenPorts        bool   `json:"only_open_ports"`
 	CVEPluginFile        string `json:"cve_plugin_file"`
 	PingSweepTCP         bool   `json:"ping_sweep_tcp"`   // Renamed from PingSweep for clarity
-	PingSweepICMP        bool   `json:"ping_sweep_icmp"`  // Added from older version 
+	PingSweepICMP        bool   `json:"ping_sweep_icmp"`  // Added from older version
 	PingSweepPorts       string `json:"ping_sweep_ports"` // Ports for TCP Ping
 	PingSweepTimeout     int    `json:"ping_sweep_timeout"`
 	EnableMACLookup      bool   `json:"enable_mac_lookup"`
@@ -1687,12 +1687,11 @@ func isHostAliveICMP(host string, timeout time.Duration) bool {
 		return false
 	}
 
-	// Fixed: Changed 'proto' from a function type to an int type
 	var proto int
 	if isIPv4 {
-		proto = ipv4.ICMPTypeEchoReply.Protocol // 1 (ICMP for IPv4)
+		proto = ipv4.ICMPTypeEchoReply.Protocol() // 1 (ICMP for IPv4)
 	} else {
-		proto = ipv6.ICMPTypeEchoReply.Protocol // 58 (ICMPv6)
+		proto = ipv6.ICMPTypeEchoReply.Protocol() // 58 (ICMPv6)
 	}
 
 	parsedMsg, err := icmp.ParseMessage(proto, rb[:n])
