@@ -1379,7 +1379,6 @@ func AttemptToGetMACAddress(ipAddr string, timeout time.Duration) string {
 	// Try common ports, a failure here is fine, it's just to stimulate ARP
 	portsToTry := []string{"80", "443", "22"}
 	for _, port := range portsToTry {
-		dialCtx, dialCancel := context.WithTimeout(ctx, quickDialTimeout)
 		// Corrected line: Used quickDialTimeout directly as the timeout duration for net.DialTimeout
 		tempConn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, port), quickDialTimeout)
 		if dialErr == nil && tempConn != nil {
