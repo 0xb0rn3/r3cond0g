@@ -1,3 +1,825 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"encoding/xml"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/alphadose/haxmap"
+	"github.com/dgraph-io/badger/v4"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+	"github.com/hashicorp/golang-lru/v2"
+	"github.com/miekg/dns"
+	"github.com/projectdiscovery/blackrock"
+	"github.com/projectdiscovery/mapcidr"
+	"github.com/rs/zerolog"
+	"github.com/schollz/progressbar/v3"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/tevino/abool/v2"
+	"github.com/valyala/fasthttp"
+	"github.com/yl2chen/cidranger"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+	"golang.org/x/sys/unix"
+	"golang.org/x/time/rate"
+)
+
+const (
+	VERSION    = "3.0.0 HellHound"
+	APP_NAME   = "r3cond0g"
+	BUILD_DATE = "2025-08-16"
+	AUTHORS    = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
+	
+	// Performance defaults
+	DEFAULT_TIMEOUT        = 1000 // ms
+	DEFAULT_SERVICE_TIMEOUT = 5000 // ms
+	DEFAULT_CONCURRENCY    = 100
+	DEFAULT_PING_TIMEOUT   = 300 // ms
+)
+
+// Enhanced Config with all features from both versions
+type Config struct {
+	// Target configuration
+	Targets        []string
+	TargetHost     string `json:"target_host"`
+	TargetFile     string `json:"target_file"`
+	CIDR           string
+	ExcludeHosts   []string
+	
+	// Port configuration
+	Ports          string
+	PortRange      string `json:"port_range"`
+	TopPorts       int
+	FastMode       bool
+	UltraFastMode  bool
+	
+	// Timing and performance
+	ScanTimeout          int           `json:"scan_timeout"`
+	ServiceDetectTimeout int           `json:"service_detect_timeout"`
+	Timeout              time.Duration
+	MaxRetries           int
+	MaxConcurrency       int    `json:"max_concurrency"`
+	Concurrency          int
+	RateLimit            int
+	DelayJitter          time.Duration
+	
+	// Scan types
+	SYNScan        bool
+	ACKScan        bool
+	UDPScan        bool   `json:"udp_scan"`
+	NULLScan       bool
+	FINScan        bool
+	XmasScan       bool
+	MaimonScan     bool
+	WindowScan     bool
+	IdleScan       bool
+	
+	// Discovery methods
+	PingSweepTCP    bool   `json:"ping_sweep_tcp"`
+	PingSweepICMP   bool   `json:"ping_sweep_icmp"`
+	PingSweepPorts  string `json:"ping_sweep_ports"`
+	PingSweepTimeout int   `json:"ping_sweep_timeout"`
+	
+	// Service detection
+	ServiceDetect   bool
+	VersionDetect   bool
+	OSDetect        bool
+	ScriptScan      bool
+	AggressiveScan  bool
+	ProbeFiles      string `json:"probe_files"`
+	
+	// Vulnerability scanning
+	VulnMapping     bool   `json:"vuln_mapping"`
+	NVDAPIKey       string `json:"nvd_api_key"`
+	CVEPluginFile   string `json:"cve_plugin_file"`
+	
+	// Network analysis
+	TopologyMapping bool   `json:"topology_mapping"`
+	EnableMACLookup bool   `json:"enable_mac_lookup"`
+	
+	// Evasion techniques
+	FragmentPackets bool
+	DecoyHosts      []string
+	SourcePort      int
+	Spoofing        bool
+	TTLValue        int
+	BadSum          bool
+	
+	// Output options
+	OutputFile      string `json:"output_file"`
+	OutputFormat    string
+	NmapResultsFile string `json:"nmap_results_file"`
+	OnlyOpenPorts   bool   `json:"only_open_ports"`
+	Verbose         bool
+	Debug           bool
+	Quiet           bool
+	NoColor         bool
+	JSONOutput      bool
+	XMLOutput       bool
+	GrepOutput      bool
+	
+	// Network options
+	Interface       string
+	SourceIP        string
+	IPv6            bool
+	
+	// Database and caching
+	UseCache        bool
+	CacheDir        string
+	DBPath          string
+	
+	// Advanced features
+	EnableML        bool
+	EnableAI        bool
+	ProxyURL        string
+	TorProxy        bool
+	DNSServers      []string
+	UserAgent       string
+}
+
+// Enhanced scan result combining both versions
+type EnhancedScanResult struct {
+	// Basic information
+	Host         string        `json:"host"`
+	IP           string        `json:"ip"`
+	Port         int           `json:"port"`
+	Protocol     string        `json:"protocol"`
+	State        string        `json:"state"`
+	
+	// Service information
+	Service             string        `json:"service,omitempty"`
+	Version             string        `json:"version,omitempty"`
+	Banner              string        `json:"banner,omitempty"`
+	ServiceName         string        `json:"service_name,omitempty"`
+	ServiceVersion      string        `json:"service_version,omitempty"`
+	DetectionConfidence int           `json:"detection_confidence,omitempty"`
+	
+	// OS and hardware
+	OS              string        `json:"os,omitempty"`
+	OSGuess         string        `json:"os_guess,omitempty"`
+	CPE             []string      `json:"cpe,omitempty"`
+	MACAddress      string        `json:"mac_address,omitempty"`
+	MACVendor       string        `json:"mac_vendor,omitempty"`
+	
+	// Security information
+	Vulnerabilities []string      `json:"vulnerabilities,omitempty"`
+	CVEs            []CVEInfo     `json:"cves,omitempty"`
+	Scripts         map[string]string `json:"scripts,omitempty"`
+	
+	// TLS/SSL information
+	SSLInfo         *SSLInfo      `json:"ssl_info,omitempty"`
+	TLSInfo         *TLSInfo      `json:"tls_info,omitempty"`
+	ALPNProtocol    string        `json:"alpn_protocol,omitempty"`
+	TLSCommonName   string        `json:"tls_common_name,omitempty"`
+	
+	// HTTP information
+	HTTPInfo        *HTTPInfo     `json:"http_info,omitempty"`
+	
+	// DNS information
+	DNSInfo         *DNSInfo      `json:"dns_info,omitempty"`
+	
+	// NetBIOS information
+	NetBIOSInfo     *NetBIOSInfo  `json:"netbios_info,omitempty"`
+	
+	// Timing and metadata
+	ResponseTime    time.Duration `json:"response_time"`
+	Timestamp       time.Time     `json:"timestamp"`
+	TTL             int           `json:"ttl"`
+	WindowSize      int           `json:"window_size"`
+	Fingerprint     string        `json:"fingerprint"`
+	Confidence      float64       `json:"confidence"`
+	RawPacket       []byte        `json:"-"`
+}
+
+// CVE information structure
+type CVEInfo struct {
+	ID          string    `json:"id"`
+	CVSS        float64   `json:"cvss"`
+	Severity    string    `json:"severity"`
+	Description string    `json:"description"`
+	Published   time.Time `json:"published"`
+	References  []string  `json:"references"`
+}
+
+// SSL/TLS information
+type SSLInfo struct {
+	Version         string      `json:"version"`
+	Cipher          string      `json:"cipher"`
+	Certificates    []CertInfo  `json:"certificates"`
+	ValidFrom       time.Time   `json:"valid_from"`
+	ValidTo         time.Time   `json:"valid_to"`
+	SubjectAltNames []string    `json:"subject_alt_names"`
+	Vulnerabilities []string    `json:"vulnerabilities"`
+}
+
+// TLS information for probe results
+type TLSInfo struct {
+	CommonName         string   `json:"common_name"`
+	SubjectAltNames    []string `json:"subject_alt_names"`
+	Issuer             string   `json:"issuer"`
+	NotBefore          string   `json:"not_before"`
+	NotAfter           string   `json:"not_after"`
+	SignatureAlgorithm string   `json:"signature_algorithm"`
+}
+
+// Certificate information
+type CertInfo struct {
+	Subject    string    `json:"subject"`
+	Issuer     string    `json:"issuer"`
+	Serial     string    `json:"serial"`
+	Algorithm  string    `json:"algorithm"`
+	ValidFrom  time.Time `json:"valid_from"`
+	ValidTo    time.Time `json:"valid_to"`
+}
+
+// HTTP information
+type HTTPInfo struct {
+	StatusCode   int               `json:"status_code"`
+	Headers      map[string]string `json:"headers"`
+	Server       string            `json:"server"`
+	Title        string            `json:"title"`
+	Technologies []string          `json:"technologies"`
+	Forms        []FormInfo        `json:"forms"`
+	Links        []string          `json:"links"`
+	Cookies      []CookieInfo      `json:"cookies"`
+}
+
+// Form information
+type FormInfo struct {
+	Action   string            `json:"action"`
+	Method   string            `json:"method"`
+	Fields   map[string]string `json:"fields"`
+}
+
+// Cookie information
+type CookieInfo struct {
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain"`
+	Path     string `json:"path"`
+	Secure   bool   `json:"secure"`
+	HTTPOnly bool   `json:"http_only"`
+}
+
+// DNS information
+type DNSInfo struct {
+	Records     map[string][]string `json:"records"`
+	Nameservers []string            `json:"nameservers"`
+	MXRecords   []MXRecord          `json:"mx_records"`
+	TXTRecords  []string            `json:"txt_records"`
+	SOA         *SOARecord          `json:"soa"`
+}
+
+// MX record
+type MXRecord struct {
+	Priority int    `json:"priority"`
+	Host     string `json:"host"`
+}
+
+// SOA record
+type SOARecord struct {
+	Mname   string `json:"mname"`
+	Rname   string `json:"rname"`
+	Serial  uint32 `json:"serial"`
+	Refresh uint32 `json:"refresh"`
+	Retry   uint32 `json:"retry"`
+	Expire  uint32 `json:"expire"`
+	Minimum uint32 `json:"minimum"`
+}
+
+// NetBIOS information
+type NetBIOSInfo struct {
+	Name       string   `json:"name"`
+	Workgroup  string   `json:"workgroup"`
+	MAC        string   `json:"mac"`
+	Users      []string `json:"users"`
+	Shares     []string `json:"shares"`
+}
+
+// Nmap XML structures for parsing
+type NmapRun struct {
+	XMLName xml.Name   `xml:"nmaprun"`
+	Hosts   []NmapHost `xml:"host"`
+}
+
+type NmapHost struct {
+	Addresses []NmapAddress `xml:"address"`
+	Ports     NmapPorts     `xml:"ports"`
+	Status    NmapStatus    `xml:"status"`
+}
+
+type NmapAddress struct {
+	Addr     string `xml:"addr,attr"`
+	AddrType string `xml:"addrtype,attr"`
+	Vendor   string `xml:"vendor,attr,omitempty"`
+}
+
+type NmapStatus struct {
+	State string `xml:"state,attr"`
+}
+
+type NmapPorts struct {
+	Ports []NmapPort `xml:"port"`
+}
+
+type NmapPort struct {
+	Protocol string      `xml:"protocol,attr"`
+	PortID   int         `xml:"portid,attr"`
+	State    NmapState   `xml:"state"`
+	Service  NmapService `xml:"service"`
+}
+
+type NmapState struct {
+	State string `xml:"state,attr"`
+}
+
+type NmapService struct {
+	Name    string `xml:"name,attr"`
+	Version string `xml:"version,attr"`
+}
+
+// Probe definitions for service detection
+type ProbeDefinition struct {
+	Name               string   `json:"name"`
+	Protocol           string   `json:"protocol"`
+	Ports              []int    `json:"ports"`
+	Priority           int      `json:"priority"`
+	RequiresTLS        bool     `json:"requires_tls"`
+	TLSALPNProtocols   []string `json:"tls_alpn_protocols"`
+	SendPayload        string   `json:"send_payload"`
+	ReadPattern        string   `json:"read_pattern"`
+	ServiceOverride    string   `json:"service_override"`
+	VersionTemplate    string   `json:"version_template"`
+	TimeoutMs          int      `json:"timeout_ms"`
+	NextProbeOnMatch   string   `json:"next_probe_on_match"`
+	compiledRegex      *regexp.Regexp
+}
+
+// Probe engine for service detection
+type ProbeEngine struct {
+	probes         []ProbeDefinition
+	probesByName   map[string]*ProbeDefinition
+	fallbackProbes []ProbeDefinition
+}
+
+// Service info from probe detection
+type ServiceInfo struct {
+	ServiceName    string            `json:"service_name"`
+	ServiceVersion string            `json:"service_version"`
+	TLSInfo        *TLSInfo          `json:"tls_info,omitempty"`
+	ALPNProtocol   string            `json:"alpn_protocol,omitempty"`
+	Confidence     int               `json:"confidence"`
+	ExtraData      map[string]string `json:"extra_data,omitempty"`
+}
+
+// Advanced scanner with all features
+type Scanner struct {
+	config          *Config
+	logger          zerolog.Logger
+	metrics         *Metrics
+	cache           *lru.Cache[string, interface{}]
+	db              *badger.DB
+	limiter         *rate.Limiter
+	blackrock       *blackrock.Blackrock
+	cidranger       cidranger.Ranger
+	portMap         *haxmap.Map[int, *PortInfo]
+	serviceDB       *ServiceDatabase
+	fingerprintDB   *FingerprintDatabase
+	vulnDB          *VulnerabilityDatabase
+	scriptEngine    *ScriptEngine
+	probeEngine     *ProbeEngine
+	ml              *MLEngine
+	pcapHandle      *pcap.Handle
+	dnsClient       *dns.Client
+	httpClient      *fasthttp.Client
+	sshConfig       *ssh.ClientConfig
+	tlsConfig       *tls.Config
+	rawSocket       int
+	workers         *WorkerPool
+	results         chan *EnhancedScanResult
+	errors          chan error
+	done            *abool.AtomicBool
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	
+	// From older version
+	scannedPorts    int64
+	activeHostPings int64
+	nvdCache        sync.Map
+	customCVEs      map[string][]string
+	ouiData         map[string]string
+}
+
+// Metrics tracking
+type Metrics struct {
+	StartTime       time.Time
+	EndTime         time.Time
+	TotalHosts      atomic.Int64
+	ScannedHosts    atomic.Int64
+	TotalPorts      atomic.Int64
+	OpenPorts       atomic.Int64
+	ClosedPorts     atomic.Int64
+	FilteredPorts   atomic.Int64
+	PacketsSent     atomic.Int64
+	PacketsReceived atomic.Int64
+	BytesSent       atomic.Int64
+	BytesReceived   atomic.Int64
+	Errors          atomic.Int64
+	Retries         atomic.Int64
+}
+
+// Port information
+type PortInfo struct {
+	Port        int
+	Protocol    string
+	Service     string
+	Description string
+	Frequency   float64
+}
+
+// Service database
+type ServiceDatabase struct {
+	db       *leveldb.DB
+	patterns map[string][]*ServicePattern
+	cache    *lru.Cache[string, *ServiceInfo]
+}
+
+// Service pattern
+type ServicePattern struct {
+	Pattern     []byte
+	Service     string
+	Version     string
+	CPE         string
+	Confidence  float64
+}
+
+// Fingerprint database structures
+type FingerprintDatabase struct {
+	os       map[string]*OSFingerprint
+	service  map[string]*ServiceFingerprint
+	app      map[string]*AppFingerprint
+}
+
+type OSFingerprint struct {
+	Name        string
+	Version     string
+	Family      string
+	Vendor      string
+	Confidence  float64
+	TTL         int
+	WindowSize  int
+	Options     []string
+}
+
+type ServiceFingerprint struct {
+	Name       string
+	Version    string
+	Protocol   string
+	Banner     string
+	Probes     []string
+	Matches    []string
+}
+
+type AppFingerprint struct {
+	Name         string
+	Version      string
+	Technologies []string
+	Headers      map[string]string
+	Cookies      []string
+	Scripts      []string
+}
+
+// Vulnerability database
+type VulnerabilityDatabase struct {
+	db        *badger.DB
+	cache     *lru.Cache[string, []*CVEInfo]
+	apiKey    string
+	rateLimit *rate.Limiter
+}
+
+// Script engine
+type ScriptEngine struct {
+	scripts  map[string]*Script
+	vm       interface{}
+	sandbox  interface{}
+	timeout  time.Duration
+}
+
+// Script definition
+type Script struct {
+	Name        string
+	Category    string
+	Description string
+	Author      string
+	License     string
+	Code        string
+	Ports       []int
+	Services    []string
+	OSTypes     []string
+}
+
+// ML engine
+type MLEngine struct {
+	model      interface{}
+	features   interface{}
+	predictor  interface{}
+	threshold  float64
+}
+
+// Worker pool
+type WorkerPool struct {
+	workers    int
+	queue      chan Task
+	results    chan interface{}
+	errors     chan error
+	wg         sync.WaitGroup
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+// Task interface
+type Task interface {
+	Execute(ctx context.Context) (interface{}, error)
+	Priority() int
+}
+
+// Global variables for compatibility with older version
+var (
+	config          Config
+	results         []EnhancedScanResult
+	mutex           sync.Mutex
+	wg              sync.WaitGroup
+	sem             chan struct{}
+	scannedPorts    int64
+	activeHostPings int64
+	probeEngineInstance *ProbeEngine
+	nvdCache        sync.Map
+	customCVEs      = make(map[string][]string)
+	httpClientSimple = &http.Client{Timeout: 10 * time.Second}
+	limiter         = rate.NewLimiter(rate.Every(30*time.Second/5), 5)
+	
+	// Service to CPE mapping for vulnerability lookups
+	serviceToCPE = map[string]struct{ Vendor, Product string }{
+		"http":           {"apache", "http_server"},
+		"https":          {"apache", "http_server"},
+		"http/2":         {"apache", "http_server"},
+		"nginx":          {"nginx", "nginx"},
+		"ssh":            {"openssh", "openssh"},
+		"ftp":            {"proftpd", "proftpd"},
+		"mysql":          {"oracle", "mysql"},
+		"dns":            {"isc", "bind"},
+		"smtp":           {"postfix", "postfix"},
+		"smtps":          {"postfix", "postfix"},
+		"redis":          {"redis", "redis"},
+		"rdp":            {"microsoft", "remote_desktop_services"},
+		"ms-wbt-server":  {"microsoft", "remote_desktop_services"},
+		"microsoft-ds":   {"microsoft", "windows"},
+		"netbios-ssn":    {"microsoft", "windows"},
+		"winrm":          {"microsoft", "windows_remote_management"},
+		"snmp":           {"net-snmp", "net-snmp"},
+		"pop3":           {"dovecot", "dovecot"},
+		"pop3s":          {"dovecot", "dovecot"},
+		"imap":           {"dovecot", "dovecot"},
+		"imaps":          {"dovecot", "dovecot"},
+		"postgresql":     {"postgresql", "postgresql"},
+		"mongodb":        {"mongodb", "mongodb"},
+		"ldap":           {"openldap", "openldap"},
+		"ldaps":          {"openldap", "openldap"},
+		"vnc":            {"realvnc", "vnc"},
+		"telnet":         {"gnu", "inetutils"},
+		"msrpc":          {"microsoft", "windows"},
+		"oracle":         {"oracle", "database"},
+		"mssql":          {"microsoft", "sql_server"},
+	}
+	
+	// OUI database for MAC vendor lookup
+	ouiData = map[string]string{
+		"00:00:0C": "Cisco Systems, Inc",
+		"00:05:85": "Juniper Networks, Inc",
+		"00:0B:86": "Hewlett Packard Enterprise",
+		"00:06:5B": "Dell Inc.",
+		"00:0A:F7": "Broadcom Corporation",
+		"00:1C:73": "Arista Networks, Inc",
+		"00:15:6D": "Ubiquiti Inc",
+		"00:0C:42": "Routerboard/MikroTikls SIA",
+		"00:09:0F": "Fortinet Inc",
+		"00:1B:17": "Palo Alto Networks",
+		"00:09:5B": "NETGEAR, Inc",
+		"00:05:5F": "D-Link Corporation",
+		"00:03:2F": "Linksys",
+		"00:02:B3": "Intel Corporation",
+		"00:E0:4C": "REALTEK SEMICONDUCTOR CORP.",
+		"00:02:C9": "Mellanox Technologies, Inc.",
+		"00:0E:1E": "QLogic Corp",
+		"00:02:55": "IBM Corporation",
+		"00:25:90": "Super Micro Computer, Inc.",
+		"00:05:69": "VMware, Inc.",
+		"00:0C:29": "VMware, Inc.",
+		"00:50:56": "VMware, Inc.",
+		"00:03:FF": "Microsoft Corporation",
+		"00:15:5D": "Microsoft Corporation",
+		"00:16:3E": "XenSource, Inc.",
+		"00:03:93": "Apple, Inc.",
+		"00:07:AB": "Samsung Electronics Co.,Ltd",
+		"00:01:64": "Lenovo Mobile Communication Technology Ltd.",
+		"00:01:80": "ASUSTek COMPUTER INC.",
+		"00:01:24": "Acer Incorporated",
+		"3C:5A:B4": "Google, Inc.",
+		"B8:27:EB": "Raspberry Pi Foundation",
+		"24:0A:C4": "Espressif Inc.",
+	}
+	
+	// Vulnerability database
+	vulnDB = map[string][]string{
+		"Apache HTTPD 2.4.44":  {"CVE-2020-9490"},
+		"Apache HTTPD 2.4.48":  {"CVE-2019-17567"},
+		"Apache HTTPD 2.4.50":  {"CVE-2021-41524"},
+		"Apache HTTPD 2.4.53":  {"CVE-2022-22719"},
+		"Apache HTTPD 2.4.54":  {"CVE-2022-26377", "CVE-2022-28330", "CVE-2022-28614", "CVE-2022-28615"},
+		"OpenSSH 7.8p1":        {"CVE-2018-15473"},
+		"OpenSSH 7.9p1":        {"CVE-2019-6110", "CVE-2019-6111"},
+		"OpenSSH 8.5":          {"CVE-2021-28041"},
+		"OpenSSH 9.2":          {"CVE-2023-25136"},
+		"OpenSSH 9.3p2":        {"CVE-2023-38408"},
+		"Nginx 1.6.1":          {"CVE-2014-3556"},
+		"Nginx 1.6.2":          {"CVE-2014-3616"},
+		"Nginx 1.9.10":         {"CVE-2016-0742", "CVE-2016-0746", "CVE-2016-0747"},
+		"MySQL 5.7.31":         {"CVE-2018-2562"},
+		"MySQL 8.0.22":         {"CVE-2020-2578", "CVE-2020-2621"},
+		"PHP 7.4.28":           {"CVE-2021-21708"},
+		"PHP 8.0.30":           {"CVE-2023-3824"},
+		"OpenSSL 1.0.1g":       {"CVE-2014-0160"}, // Heartbleed
+		"PostgreSQL 15.4":      {"CVE-2023-39418"},
+	}
+)
+
+// Initialize scanner
+func NewScanner(cfg *Config) (*Scanner, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Setup logger
+	logger := zerolog.New(os.Stdout).With().
+		Timestamp().
+		Str("app", APP_NAME).
+		Str("version", VERSION).
+		Logger()
+	
+	if cfg.Debug {
+		logger = logger.Level(zerolog.DebugLevel)
+	} else if cfg.Verbose {
+		logger = logger.Level(zerolog.InfoLevel)
+	} else {
+		logger = logger.Level(zerolog.WarnLevel)
+	}
+	
+	// Initialize cache
+	cache, err := lru.New[string, interface{}](10000)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cache: %w", err)
+	}
+	
+	// Initialize database
+	var db *badger.DB
+	if cfg.UseCache {
+		opts := badger.DefaultOptions(cfg.DBPath)
+		opts.Logger = nil
+		db, err = badger.Open(opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open database: %w", err)
+		}
+	}
+	
+	// Initialize rate limiter
+	var rateLimiter *rate.Limiter
+	if cfg.RateLimit > 0 {
+		rateLimiter = rate.NewLimiter(rate.Limit(cfg.RateLimit), cfg.RateLimit)
+	}
+	
+	// Initialize Blackrock for random port shuffling
+	br := blackrock.New(65536, time.Now().UnixNano())
+	
+	// Initialize CIDR ranger
+	ranger := cidranger.NewPCTrieRanger()
+	
+	// Initialize scanner
+	s := &Scanner{
+		config:          cfg,
+		logger:          logger,
+		metrics:         &Metrics{StartTime: time.Now()},
+		cache:           cache,
+		db:              db,
+		limiter:         rateLimiter,
+		blackrock:       br,
+		cidranger:       ranger,
+		portMap:         haxmap.New[int, *PortInfo](),
+		done:            abool.New(),
+		results:         make(chan *EnhancedScanResult, 1000),
+		errors:          make(chan error, 100),
+		ctx:             ctx,
+		cancel:          cancel,
+		customCVEs:      customCVEs,
+		ouiData:         ouiData,
+	}
+	
+	// Initialize components
+	if err := s.initializeComponents(); err != nil {
+		return nil, fmt.Errorf("failed to initialize components: %w", err)
+	}
+	
+	return s, nil
+}
+
+// Initialize scanner components
+func (s *Scanner) initializeComponents() error {
+	// Initialize probe engine for service detection
+	if s.config.ProbeFiles != "" {
+		probeFiles := strings.Split(s.config.ProbeFiles, ",")
+		for i := range probeFiles {
+			probeFiles[i] = strings.TrimSpace(probeFiles[i])
+		}
+		var err error
+		s.probeEngine, err = NewProbeEngine(probeFiles...)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to initialize probe engine")
+		}
+		probeEngineInstance = s.probeEngine // Set global instance for compatibility
+	}
+	
+	// Initialize service database
+	s.serviceDB = NewServiceDatabase(s.config.CacheDir)
+	
+	// Initialize fingerprint database
+	s.fingerprintDB = NewFingerprintDatabase()
+	
+	// Initialize vulnerability database
+	if s.config.VulnMapping {
+		s.vulnDB = NewVulnerabilityDatabase(s.config.CacheDir, s.config.NVDAPIKey)
+	}
+	
+	// Initialize script engine
+	if s.config.ScriptScan {
+		s.scriptEngine = NewScriptEngine()
+		if err := s.scriptEngine.LoadScripts(); err != nil {
+			return fmt.Errorf("failed to load scripts: %w", err)
+		}
+	}
+	
+	// Initialize ML engine
+	if s.config.EnableML {
+		s.ml = NewMLEngine()
+		if err := s.ml.LoadModel(); err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to load ML model")
+		}
+	}
+	
+	// Initialize network clients
+	s.initializeClients()
+	
+	// Initialize raw socket for SYN scanning
+	if s.config.SYNScan {
+		if err := s.initializeRawSocket(); err != nil {
+			return fmt.Errorf("failed to initialize raw socket: %w", err)
+		}
+	}
+	
+	// Initialize pcap for packet capture
+	if s.config.Interface != "" {
+		if err := s.initializePcap(); err != nil {
+			return fmt.Errorf("failed to initialize pcap: %w", err)
+		}
+	}
+	
+	// Initialize worker pool
+	concurrency := s.config.MaxConcurrency
+	if concurrency <= 0 {
+		concurrency = DEFAULT_CONCURRENCY
+	}
+	s.workers = NewWorkerPool(concurrency, s.ctx)
+	
+	// Load custom CVEs if provided
+	if s.config.CVEPluginFile != "" {
+		s.loadCustomCVEs()
+	}
+	
+	return nil
+}
+
 // Scan a single port
 func (s *Scanner) scanPort(host string, port int, protocol string) *EnhancedScanResult {
 	startTime := time.Now()
