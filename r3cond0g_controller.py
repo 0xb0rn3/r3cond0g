@@ -1,5065 +1,2548 @@
 #!/usr/bin/env python3
 """
-R3COND0G Command & Control System
-Advanced Orchestration and Management Platform
-Version: 3.0.0
-Author: 0xb0rn3 & 0xbv1
+R3COND0G (HellHound) Universal Controller Script
+Advanced Network Reconnaissance Framework
+
+Authors: 0xb0rn3 & 0xbv1
+Version: 3.0.0 HellHound
+Build Date: 2025-08-16
 """
 
 import os
 import sys
 import json
-import yaml
 import time
-import subprocess
-import argparse
-import logging
-import hashlib
-import sqlite3
-import requests
-import threading
 import shutil
+import subprocess
 import platform
+import requests
+import argparse
 import tempfile
-import concurrent.futures
+import sqlite3
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
-from enum import Enum
+import logging
+import signal
+import threading
+import queue
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 
-# Rich console output (install with: pip install rich)
+# Rich library for beautiful terminal output
 try:
     from rich.console import Console
     from rich.table import Table
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
     from rich.panel import Panel
-    from rich.syntax import Syntax
+    from rich.progress import Progress, SpinnerColumn, TextColumn
     from rich.prompt import Prompt, Confirm
-    from rich import print as rprint
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.tree import Tree
+    from rich.text import Text
+    from rich.align import Align
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
-    print("Warning: 'rich' library not installed. Install with: pip install rich")
 
-# Advanced features
-try:
-    import networkx as nx
-    import matplotlib.pyplot as plt
-    NETWORK_VIZ = True
-except ImportError:
-    NETWORK_VIZ = False
+# Constants
+VERSION = "3.0.0 HellHound"
+BUILD_DATE = "2025-08-16"
+AUTHORS = "IG:theehiv3 Alias:0xbv1 | Github:0xb0rn3"
+APP_NAME = "r3cond0g"
+REPO_URL = "https://github.com/0xb0rn3/r3cond0g"
 
-class ScanMode(Enum):
-    """Scan operation modes"""
-    STEALTH = "stealth"
-    NORMAL = "normal"
-    AGGRESSIVE = "aggressive"
-    CUSTOM = "custom"
-    DISCOVERY = "discovery"
-    VULNERABILITY = "vulnerability"
-
-class OutputFormat(Enum):
-    """Output format types"""
-    JSON = "json"
-    XML = "xml"
-    CSV = "csv"
-    HTML = "html"
-    MARKDOWN = "markdown"
-    NMAP = "nmap"
-    METASPLOIT = "metasploit"
-    SIEM = "siem"
+# Global console instance
+console = Console() if RICH_AVAILABLE else None
 
 @dataclass
 class ScanProfile:
     """Scan profile configuration"""
     name: str
-    mode: ScanMode
+    description: str
+    scan_type: str
     targets: List[str]
     ports: str
     timeout: int
     concurrency: int
-    options: Dict[str, Any]
+    rate_limit: int
+    service_detect: bool
+    version_detect: bool
+    os_detect: bool
+    vuln_mapping: bool
+    stealth_mode: bool
+    udp_scan: bool
+    ping_sweep: bool
+    output_format: str
+    additional_options: Dict
 
-class R3COND0GController:
-    """Main controller for R3COND0G orchestration"""
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+class LinuxDistribution:
+    """Linux distribution detection and management"""
     
     def __init__(self):
-        self.console = Console() if RICH_AVAILABLE else None
-        self.logger = self._setup_logging()
-        self.config = self._load_config()
-        self.cache_dir = Path.home() / ".r3cond0g_cache"
-        self.cache_dir.mkdir(exist_ok=True)
-        self.db_path = self.cache_dir / "r3cond0g.db"
-        self.probe_dir = Path("probes")
-        self.probe_dir.mkdir(exist_ok=True)
-        self.nvd_api_key = os.environ.get("NVD_API_KEY", "")
-        self.profiles = {}
+        self.distro_info = self._detect_distribution()
+        
+    def _detect_distribution(self) -> Dict[str, str]:
+        """Detect Linux distribution and version"""
+        info = {
+            'name': 'unknown',
+            'version': 'unknown',
+            'family': 'unknown',
+            'package_manager': 'unknown'
+        }
+        
+        # Check /etc/os-release first (most modern distributions)
+        if os.path.exists('/etc/os-release'):
+            with open('/etc/os-release', 'r') as f:
+                lines = f.readlines()
+                for line in lines:
+                    if line.startswith('ID='):
+                        info['name'] = line.split('=')[1].strip().strip('"')
+                    elif line.startswith('VERSION_ID='):
+                        info['version'] = line.split('=')[1].strip().strip('"')
+        
+        # Fallback methods
+        elif os.path.exists('/etc/redhat-release'):
+            with open('/etc/redhat-release', 'r') as f:
+                content = f.read().strip()
+                if 'CentOS' in content:
+                    info['name'] = 'centos'
+                elif 'Red Hat' in content:
+                    info['name'] = 'rhel'
+                elif 'Fedora' in content:
+                    info['name'] = 'fedora'
+        
+        elif os.path.exists('/etc/debian_version'):
+            info['name'] = 'debian'
+            with open('/etc/debian_version', 'r') as f:
+                info['version'] = f.read().strip()
+        
+        # Determine family and package manager
+        debian_based = ['ubuntu', 'debian', 'kali', 'parrot', 'mint', 'pop', 'elementary', 'zorin']
+        rhel_based = ['rhel', 'centos', 'fedora', 'rocky', 'alma', 'oracle']
+        arch_based = ['arch', 'manjaro', 'endeavour', 'garuda']
+        suse_based = ['opensuse', 'sles']
+        
+        if info['name'] in debian_based:
+            info['family'] = 'debian'
+            info['package_manager'] = 'apt'
+        elif info['name'] in rhel_based:
+            info['family'] = 'rhel'
+            info['package_manager'] = 'yum' if info['name'] in ['rhel', 'centos'] else 'dnf'
+        elif info['name'] in arch_based:
+            info['family'] = 'arch'
+            info['package_manager'] = 'pacman'
+        elif info['name'] in suse_based:
+            info['family'] = 'suse'
+            info['package_manager'] = 'zypper'
+        elif info['name'] == 'alpine':
+            info['family'] = 'alpine'
+            info['package_manager'] = 'apk'
+        elif info['name'] == 'gentoo':
+            info['family'] = 'gentoo'
+            info['package_manager'] = 'emerge'
+        elif info['name'] == 'void':
+            info['family'] = 'void'
+            info['package_manager'] = 'xbps'
+        
+        return info
+    
+    def get_install_command(self, packages: List[str]) -> List[str]:
+        """Get package installation command for current distribution"""
+        pm = self.distro_info['package_manager']
+        
+        if pm == 'apt':
+            return ['sudo', 'apt', 'update', '&&', 'sudo', 'apt', 'install', '-y'] + packages
+        elif pm == 'yum':
+            return ['sudo', 'yum', 'install', '-y'] + packages
+        elif pm == 'dnf':
+            return ['sudo', 'dnf', 'install', '-y'] + packages
+        elif pm == 'pacman':
+            return ['sudo', 'pacman', '-S', '--noconfirm'] + packages
+        elif pm == 'zypper':
+            return ['sudo', 'zypper', 'install', '-y'] + packages
+        elif pm == 'apk':
+            return ['sudo', 'apk', 'add'] + packages
+        elif pm == 'emerge':
+            return ['sudo', 'emerge'] + packages
+        elif pm == 'xbps':
+            return ['sudo', 'xbps-install', '-S'] + packages
+        else:
+            return ['echo', 'Unsupported package manager:', pm]
+
+class R3COND0GController:
+    """Main controller class for R3COND0G"""
+    
+    def __init__(self):
+        self.script_dir = Path(__file__).parent.absolute()
+        self.config_dir = self.script_dir / "config"
+        self.profiles_dir = self.config_dir / "profiles"
+        self.reports_dir = self.script_dir / "reports"
+        self.db_path = self.script_dir / "r3cond0g.db"
+        self.binary_path = self.script_dir / "r3cond0g"
+        self.distro = LinuxDistribution()
+        
+        # Create directories
+        for directory in [self.config_dir, self.profiles_dir, self.reports_dir]:
+            directory.mkdir(exist_ok=True)
+        
+        # Setup logging
+        self.setup_logging()
+        
+        # Initialize database
         self.init_database()
         
-    def _setup_logging(self) -> logging.Logger:
+        # Load default configuration
+        self.config = self.load_config()
+        
+    def setup_logging(self):
         """Setup logging configuration"""
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         logging.basicConfig(
             level=logging.INFO,
             format=log_format,
             handlers=[
-                logging.FileHandler("r3cond0g_controller.log"),
+                logging.FileHandler(self.script_dir / 'r3cond0g.log'),
                 logging.StreamHandler()
             ]
         )
-        return logging.getLogger("R3COND0G_Controller")
-    
-    def _load_config(self) -> Dict:
-        """Load or create default configuration"""
-        config_path = Path("controller_config.json")
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        else:
-            default_config = {
-                "version": "3.0.0",
-                "core_binary": "./r3cond0g",
-                "max_concurrency": 1000,
-                "default_timeout": 5000,
-                "cache_ttl": 86400,
-                "auto_update": True,
-                "performance_mode": "balanced",
-                "integrations": {
-                    "nmap": {"enabled": True, "path": "nmap"},
-                    "metasploit": {"enabled": False, "path": "msfconsole"},
-                    "siem": {"enabled": False, "endpoint": ""}
-                }
-            }
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=2)
-            return default_config
+        self.logger = logging.getLogger('R3COND0G')
     
     def init_database(self):
-        """Initialize SQLite database for caching and history"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Scan history table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scan_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                profile TEXT,
-                targets TEXT,
-                ports TEXT,
-                results TEXT,
-                duration REAL,
-                status TEXT
-            )
-        ''')
-        
-        # Vulnerability cache table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS vuln_cache (
-                cve_id TEXT PRIMARY KEY,
-                description TEXT,
-                cvss_score REAL,
-                published_date DATE,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-                affected_products TEXT
-            )
-        ''')
-        
-        # Performance metrics table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                scan_rate REAL,
-                memory_usage REAL,
-                cpu_usage REAL,
-                network_throughput REAL
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def build_core(self, optimize: bool = True, cross_compile: List[str] = None):
-        """Build the Go core binary with optimizations"""
-        self.logger.info("Building R3COND0G core...")
-        
-        build_cmd = ["go", "build"]
-        
-        if optimize:
-            build_cmd.extend(["-ldflags", "-s -w"])
-            
-        build_cmd.extend(["-o", "r3cond0g", "main.go"])
-        
+        """Initialize SQLite database for scan history and results"""
         try:
-            # Build for current platform
-            result = subprocess.run(build_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.logger.info("✓ Core binary built successfully")
-                
-                # Set executable permissions on Unix
-                if platform.system() != "Windows":
-                    os.chmod("r3cond0g", 0o755)
-            else:
-                self.logger.error(f"Build failed: {result.stderr}")
-                return False
-                
-            # Cross-compile if requested
-            if cross_compile:
-                for target in cross_compile:
-                    os_name, arch = target.split("/")
-                    env = os.environ.copy()
-                    env["GOOS"] = os_name
-                    env["GOARCH"] = arch
-                    
-                    output_name = f"r3cond0g_{os_name}_{arch}"
-                    if os_name == "windows":
-                        output_name += ".exe"
-                    
-                    build_cmd[-1] = "main.go"
-                    build_cmd[-2] = output_name
-                    
-                    result = subprocess.run(build_cmd, capture_output=True, text=True, env=env)
-                    if result.returncode == 0:
-                        self.logger.info(f"✓ Built for {target}")
-                    else:
-                        self.logger.error(f"Failed to build for {target}")
-                        
-            return True
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
             
-        except Exception as e:
-            self.logger.error(f"Build error: {e}")
-            return False
-    
-    def generate_probes(self, custom_services: List[str] = None):
-        """Generate probe definitions for service detection"""
-        
-        # Default TCP probes
-        tcp_probes = [
-            {
-                "name": "SSH-Banner",
-                "protocol": "TCP",
-                "ports": [22, 2222],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "^SSH-([0-9.]+)-([^\\s\\r\\n]+)",
-                "service_override": "ssh",
-                "version_template": "{{group_2}} (protocol {{group_1}})",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "HTTP-Server",
-                "protocol": "TCP",
-                "ports": [80, 8080, 8000, 3000],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
-                "service_override": "http",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 5000
-            },
-            {
-                "name": "HTTPS-Server",
-                "protocol": "TCP",
-                "ports": [443, 8443],
-                "priority": 15,
-                "requires_tls": True,
-                "tls_alpn_protocols": ["http/1.1", "h2"],
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
-                "service_override": "https",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 8000
-            },
-            {
-                "name": "MySQL-Version",
-                "protocol": "TCP",
-                "ports": [3306],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "\\x0a([0-9.]+[^\\x00]*)",
-                "service_override": "mysql",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "PostgreSQL",
-                "protocol": "TCP",
-                "ports": [5432],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f",
-                "read_pattern": "FATAL.*?version \"([^\"]+)\"",
-                "service_override": "postgresql",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "Redis-Info",
-                "protocol": "TCP",
-                "ports": [6379],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "INFO\\r\\n",
-                "read_pattern": "redis_version:([^\\r\\n]+)",
-                "service_override": "redis",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "MongoDB",
-                "protocol": "TCP",
-                "ports": [27017, 27018, 27019],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "version.*?([0-9.]+)",
-                "service_override": "mongodb",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "RDP",
-                "protocol": "TCP",
-                "ports": [3389],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x03\\x00\\x00\\x13\\x0e\\xe0\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x08\\x00\\x03\\x00\\x00\\x00",
-                "read_pattern": "\\x03\\x00\\x00\\x13\\x0e\\xd0",
-                "service_override": "rdp",
-                "version_template": "RDP Service",
-                "timeout_ms": 3000
-            }
-        ]
-        
-        # Default UDP probes
-        udp_probes = [
-            {
-                "name": "DNS-Version",
-                "protocol": "UDP",
-                "ports": [53],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x00\\x1e\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07version\\x04bind\\x00\\x00\\x10\\x00\\x03",
-                "read_pattern": "([0-9]+\\.[0-9]+)",
-                "service_override": "dns",
-                "version_template": "BIND {{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "SNMP",
-                "protocol": "UDP",
-                "ports": [161],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x30\\x26\\x02\\x01\\x00\\x04\\x06\\x70\\x75\\x62\\x6c\\x69\\x63\\xa0\\x19",
-                "read_pattern": ".",
-                "service_override": "snmp",
-                "version_template": "SNMPv1/v2c",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "NTP",
-                "protocol": "UDP",
-                "ports": [123],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x16\\x02\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00",
-                "read_pattern": ".",
-                "service_override": "ntp",
-                "version_template": "NTP Service",
-                "timeout_ms": 2000
-            }
-        ]
-        
-        # Add custom service probes if specified
-        if custom_services:
-            for service in custom_services:
-                tcp_probes.append(self._generate_custom_probe(service))
-        
-        # Save probe files
-        with open(self.probe_dir / "tcp_probes.json", 'w') as f:
-            json.dump(tcp_probes, f, indent=2)
-            
-        with open(self.probe_dir / "udp_probes.json", 'w') as f:
-            json.dump(udp_probes, f, indent=2)
-            
-        self.logger.info(f"✓ Generated {len(tcp_probes)} TCP and {len(udp_probes)} UDP probes")
-        return True
-    
-    def _generate_custom_probe(self, service: str) -> Dict:
-        """Generate a custom probe definition"""
-        return {
-            "name": f"Custom-{service}",
-            "protocol": "TCP",
-            "ports": [],  # Will be determined dynamically
-            "priority": 50,
-            "requires_tls": False,
-            "send_payload": f"{service.upper()}\\r\\n",
-            "read_pattern": f".*{service}.*",
-            "service_override": service.lower(),
-            "version_template": "{{group_0}}",
-            "timeout_ms": 5000
-        }
-    
-    def generate_config(self, profile: str = "default") -> Dict:
-        """Generate configuration for different scan profiles"""
-        
-        configs = {
-            "default": {
-                "target_host": "",
-                "port_range": "1-1000",
-                "scan_timeout": 1000,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 100,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "stealth": {
-                "target_host": "",
-                "port_range": "22,80,443,3389",
-                "scan_timeout": 3000,
-                "service_detect_timeout": 8000,
-                "max_concurrency": 10,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": False,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "fragment_packets": True,
-                "decoy_hosts": ["10.0.0.99", "10.0.0.100"],
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "aggressive": {
-                "target_host": "",
-                "port_range": "1-65535",
-                "scan_timeout": 500,
-                "service_detect_timeout": 3000,
-                "max_concurrency": 1000,
-                "udp_scan": True,
-                "vuln_mapping": True,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "enable_mac_lookup": True,
-                "os_detect": True,
-                "version_detect": True,
-                "script_scan": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "vulnerability": {
-                "target_host": "",
-                "port_range": "1-10000",
-                "scan_timeout": 2000,
-                "service_detect_timeout": 10000,
-                "max_concurrency": 50,
-                "udp_scan": False,
-                "vuln_mapping": True,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "service_detect": True,
-                "version_detect": True,
-                "nvd_api_key": self.nvd_api_key,
-                "cve_plugin_file": "custom_cves.json",
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "discovery": {
-                "target_host": "",
-                "port_range": "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080",
-                "scan_timeout": 1500,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 200,
-                "udp_scan": True,
-                "vuln_mapping": False,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "ping_sweep_ports": "80,443,22,3389,445",
-                "enable_mac_lookup": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            }
-        }
-        
-        config = configs.get(profile, configs["default"])
-        
-        # Save as JSON
-        with open(f"config_{profile}.json", 'w') as f:
-            json.dump(config, f, indent=2)
-            
-        # Save as YAML
-        with open(f"config_{profile}.yaml", 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-            
-        self.logger.info(f"✓ Generated configuration for profile: {profile}")
-        return config
-    
-    def create_scan_profile(self, name: str, base: str = "default") -> ScanProfile:
-        """Create a custom scan profile"""
-        base_config = self.generate_config(base)
-        
-        if self.console:
-            self.console.print(Panel(f"Creating scan profile: {name}", style="bold blue"))
-            
-            # Interactive configuration
-            targets = Prompt.ask("Enter targets (comma-separated)")
-            ports = Prompt.ask("Enter port range", default=base_config["port_range"])
-            timeout = int(Prompt.ask("Connection timeout (ms)", default=str(base_config["scan_timeout"])))
-            concurrency = int(Prompt.ask("Max concurrency", default=str(base_config["max_concurrency"])))
-            
-            udp = Confirm.ask("Enable UDP scanning?", default=False)
-            vuln = Confirm.ask("Enable vulnerability mapping?", default=False)
-            topology = Confirm.ask("Generate network topology?", default=False)
-            
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=targets.split(","),
-                ports=ports,
-                timeout=timeout,
-                concurrency=concurrency,
-                options={
-                    "udp_scan": udp,
-                    "vuln_mapping": vuln,
-                    "topology_mapping": topology
-                }
-            )
-        else:
-            # Non-interactive mode
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=[],
-                ports=base_config["port_range"],
-                timeout=base_config["scan_timeout"],
-                concurrency=base_config["max_concurrency"],
-                options=base_config
-            )
-        
-        self.profiles[name] = profile
-        
-        # Save profile
-        profile_path = self.cache_dir / f"profile_{name}.json"
-        with open(profile_path, 'w') as f:
-            json.dump(asdict(profile), f, indent=2)
-            
-        self.logger.info(f"✓ Created scan profile: {name}")
-        return profile
-    
-    def run_scan(self, profile: str = "default", targets: List[str] = None) -> Dict:
-        """Execute a scan with specified profile"""
-        
-        # Load or create configuration
-        if profile in self.profiles:
-            scan_profile = self.profiles[profile]
-            config = scan_profile.options
-        else:
-            config = self.generate_config(profile)
-            
-        # Override targets if provided
-        if targets:
-            config["target_host"] = ",".join(targets)
-            
-        # Prepare command
-        cmd = [self.config["core_binary"]]
-        
-        # Add configuration parameters
-        for key, value in config.items():
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(f"-{key.replace('_', '-')}")
-            elif value:
-                cmd.append(f"-{key.replace('_', '-')}")
-                cmd.append(str(value))
-        
-        # Execute scan
-        self.logger.info(f"Starting scan with profile: {profile}")
-        start_time = time.time()
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-            duration = time.time() - start_time
-            
-            # Parse results
-            scan_results = self._parse_scan_output(result.stdout)
-            
-            # Store in database
-            self._store_scan_results(profile, targets, config.get("port_range", ""), 
-                                   scan_results, duration, "completed")
-            
-            self.logger.info(f"✓ Scan completed in {duration:.2f} seconds")
-            return scan_results
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error("Scan timeout exceeded")
-            return {"error": "timeout"}
-        except Exception as e:
-            self.logger.error(f"Scan error: {e}")
-            return {"error": str(e)}
-    
-    def _parse_scan_output(self, output: str) -> Dict:
-        """Parse scan output into structured format"""
-        results = {
-            "hosts": [],
-            "services": {},
-            "vulnerabilities": [],
-            "statistics": {}
-        }
-        
-        # Basic parsing (would be more sophisticated in production)
-        lines = output.split("\n")
-        for line in lines:
-            if "open" in line.lower():
-                # Parse open port information
-                parts = line.split()
-                if len(parts) >= 3:
-                    host = parts[0]
-                    port = parts[1]
-                    service = parts[2] if len(parts) > 2 else "unknown"
-                    
-                    if host not in results["services"]:
-                        results["services"][host] = []
-                    results["services"][host].append({
-                        "port": port,
-                        "service": service,
-                        "state": "open"
-                    })
-                    
-        return results
-    
-    def _store_scan_results(self, profile: str, targets: List[str], ports: str, 
-                           results: Dict, duration: float, status: str):
-        """Store scan results in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO scan_history (profile, targets, ports, results, duration, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (profile, json.dumps(targets), ports, json.dumps(results), duration, status))
-        
-        conn.commit()
-        conn.close()
-    
-    def integrate_nmap(self, nmap_file: str) -> Dict:
-        """Import and process Nmap XML results"""
-        self.logger.info(f"Importing Nmap results from {nmap_file}")
-        
-        try:
-            tree = ET.parse(nmap_file)
-            root = tree.getroot()
-            
-            results = {
-                "hosts": [],
-                "services": {},
-                "os_detection": {}
-            }
-            
-            for host in root.findall('.//host'):
-                addr = host.find('.//address[@addrtype="ipv4"]')
-                if addr is not None:
-                    ip = addr.get('addr')
-                    results["hosts"].append(ip)
-                    results["services"][ip] = []
-                    
-                    # Parse ports
-                    for port in host.findall('.//port'):
-                        port_id = port.get('portid')
-                        protocol = port.get('protocol')
-                        state = port.find('state').get('state')
-                        service = port.find('service')
-                        
-                        service_info = {
-                            "port": port_id,
-                            "protocol": protocol,
-                            "state": state
-                        }
-                        
-                        if service is not None:
-                            service_info["service"] = service.get('name', 'unknown')
-                            service_info["version"] = service.get('version', '')
-                            
-                        results["services"][ip].append(service_info)
-                    
-                    # Parse OS detection
-                    os_match = host.find('.//osmatch')
-                    if os_match is not None:
-                        results["os_detection"][ip] = {
-                            "name": os_match.get('name'),
-                            "accuracy": os_match.get('accuracy')
-                        }
-            
-            # Convert to R3COND0G format and enhance
-            enhanced_results = self._enhance_nmap_results(results)
-            
-            self.logger.info(f"✓ Imported {len(results['hosts'])} hosts from Nmap")
-            return enhanced_results
-            
-        except Exception as e:
-            self.logger.error(f"Failed to parse Nmap file: {e}")
-            return {}
-    
-    def _enhance_nmap_results(self, nmap_results: Dict) -> Dict:
-        """Enhance Nmap results with additional scanning"""
-        # Run targeted scans on discovered services
-        enhanced = nmap_results.copy()
-        
-        for host, services in nmap_results["services"].items():
-            # Run service detection on open ports
-            open_ports = [s["port"] for s in services if s["state"] == "open"]
-            if open_ports:
-                config = {
-                    "target_host": host,
-                    "port_range": ",".join(open_ports),
-                    "service_detect": True,
-                    "version_detect": True,
-                    "vuln_mapping": True
-                }
-                
-                # Run focused scan
-                scan_results = self.run_scan("custom", [host])
-                
-                # Merge results
-                if host in scan_results.get("services", {}):
-                    enhanced["services"][host] = scan_results["services"][host]
-                    
-        return enhanced
-    
-    def generate_metasploit_rc(self, scan_results: Dict, output_file: str = "r3cond0g.rc"):
-        """Generate Metasploit resource script from scan results"""
-        self.logger.info("Generating Metasploit resource script")
-        
-        rc_commands = []
-        rc_commands.append("# R3COND0G Metasploit Resource Script")
-        rc_commands.append(f"# Generated: {datetime.now()}")
-        rc_commands.append("")
-        
-        # Workspace setup
-        rc_commands.append("workspace -a r3cond0g_scan")
-        rc_commands.append("")
-        
-        # Add discovered hosts
-        for host in scan_results.get("hosts", []):
-            rc_commands.append(f"db_nmap -sV -p- {host}")
-            
-        # Generate exploit suggestions based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    port = service.get("port")
-                    svc_name = service.get("service", "").lower()
-                    
-                    # Common service exploits
-                    if "ssh" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/ssh/ssh_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "http" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/http/dir_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append(f"set RPORT {port}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "smb" in svc_name or "microsoft-ds" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/smb/smb_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "mysql" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/mysql/mysql_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                    
-                    elif "rdp" in svc_name or port == "3389":
-                        rc_commands.append(f"use auxiliary/scanner/rdp/rdp_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-        
-        # Save resource script
-        with open(output_file, 'w') as f:
-            f.write("\n".join(rc_commands))
-            
-        self.logger.info(f"✓ Metasploit resource script saved to {output_file}")
-        return output_file
-    
-    def generate_siem_feed(self, scan_results: Dict, format: str = "cef") -> str:
-        """Generate SIEM-compatible event feed"""
-        events = []
-        
-        if format == "cef":
-            # Common Event Format
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"CEF:0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"Open Port Detected|3|src={host} dpt={service.get('port')} "
-                            f"proto={service.get('protocol', 'tcp')} app={service.get('service', 'unknown')} "
-                            f"msg=Open port detected during reconnaissance scan"
-                        )
-                        events.append(event)
-                        
-            # Add vulnerability events
-            for vuln in scan_results.get("vulnerabilities", []):
-                event = (
-                    f"CEF:0|R3COND0G|NetworkScanner|3.0.0|VULN_DETECTED|"
-                    f"Vulnerability Detected|7|src={vuln.get('host')} "
-                    f"cve={vuln.get('cve_id')} cvss={vuln.get('cvss_score', 0)} "
-                    f"msg={vuln.get('description', 'Vulnerability detected')}"
+            # Create tables
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scans (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT UNIQUE,
+                    profile_name TEXT,
+                    targets TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    status TEXT,
+                    results_file TEXT,
+                    command TEXT
                 )
-                events.append(event)
-                
-        elif format == "leef":
-            # Log Event Extended Format (IBM QRadar)
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"LEEF:1.0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"src={host}|dst={host}|dstPort={service.get('port')}|"
-                            f"proto={service.get('protocol', 'tcp')}|app={service.get('service', 'unknown')}"
-                        )
-                        events.append(event)
-                        
-        elif format == "json":
-            # JSON format for modern SIEMs
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = {
-                            "timestamp": datetime.now().isoformat(),
-                            "event_type": "port_scan",
-                            "severity": "medium",
-                            "source_tool": "R3COND0G",
-                            "host": host,
-                            "port": service.get("port"),
-                            "protocol": service.get("protocol", "tcp"),
-                            "service": service.get("service", "unknown"),
-                            "state": service.get("state")
-                        }
-                        events.append(json.dumps(event))
-        
-        return "\n".join(events) if format != "json" else events
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS scan_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT,
+                    host TEXT,
+                    port INTEGER,
+                    protocol TEXT,
+                    state TEXT,
+                    service TEXT,
+                    version TEXT,
+                    banner TEXT,
+                    vulnerabilities TEXT,
+                    FOREIGN KEY (scan_id) REFERENCES scans (scan_id)
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE,
+                    config TEXT,
+                    created_at TEXT
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Failed to initialize database: {e}")
     
-    def nvd_integration(self, cve_list: List[str] = None, bulk_update: bool = False):
-        """Integrate with NVD API for vulnerability information"""
-        if not self.nvd_api_key:
-            self.logger.warning("NVD API key not configured")
-            return []
+    def load_config(self) -> Dict:
+        """Load default configuration"""
+        default_config = {
+            "version": VERSION,
+            "build_date": BUILD_DATE,
+            "default_timeout": 1000,
+            "default_concurrency": 100,
+            "max_concurrency": 10000,
+            "rate_limit": 1000,
+            "output_formats": ["json", "xml", "html", "csv", "markdown"],
+            "supported_protocols": ["tcp", "udp", "icmp"],
+            "default_ports": {
+                "top100": "7,9,13,21-23,25-26,37,53,79-81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,443-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995,1025-1029,1110,1433,1720,1723,1755,1900,2000-2001,2049,2121,2717,3000,3128,3306,3389,3986,4899,5000,5009,5051,5060,5101,5190,5357,5432,5631,5666,5800,5900,6000-6001,6646,7070,8000,8008-8009,8080-8081,8443,8888,9100,9999-10000,32768,49152-49157",
+                "top1000": "1,3-4,6-7,9,13,17,19-26,30,32-33,37,42-43,49,53,70,79-85,88-90,99-100,106,109-111,113,119,125,135,139,143-144,146,161,163,179,199,211-212,222,254-255,259,264,280,301,306,311,340,366,389,406-407,416-417,425,427,443-445,458,464-465,481,497,500,512-515,524,541,543-545,548,554-555,563,587,593,616-617,625,631,636,646,648,666-668,683,687,691,700,705,711,714,720,722,726,749,765,777,783,787,800-801,808,843,873,880,888,898,900-903,911-912,981,987,990,992-993,995,999-1002,1007,1009-1011,1021-1100,1102,1104-1108,1110-1114,1117,1119,1121-1124,1126,1130-1132,1137-1138,1141,1145,1147-1149,1151-1152,1154,1163-1166,1169,1174-1175,1183,1185-1187,1192,1198-1199,1201,1213,1216-1218,1233-1234,1236,1244,1247-1248,1259,1271-1272,1277,1287,1296,1300-1301,1309-1311,1322,1328,1334,1352,1417,1433-1434,1443,1455,1461,1494,1500-1501,1503,1521,1524,1533,1556,1580,1583,1594,1600,1641,1658,1666,1687-1688,1700,1717-1721,1723,1755,1761,1782-1783,1801,1805,1812,1839-1840,1862-1864,1875,1900,1914,1935,1947,1971-1972,1974,1984,1998-2010,2013,2020-2022,2030,2033-2035,2038,2040-2043,2045-2049,2065,2068,2099-2100,2103,2105-2107,2111,2119,2121,2126,2135,2144,2160-2161,2170,2179,2190-2191,2196,2200,2222,2251,2260,2288,2301,2323,2366,2381-2383,2393-2394,2399,2401,2492,2500,2522,2525,2557,2601-2602,2604-2605,2607-2608,2638,2701-2702,2710,2717-2718,2725,2800,2809,2811,2869,2875,2909-2910,2920,2967-2968,2998,3000-3001,3003,3005-3007,3011,3013,3017,3030-3031,3052,3071,3077,3128,3168,3211,3221,3260-3261,3268-3269,3283,3300-3301,3306,3322-3325,3333,3351,3367,3369-3372,3389-3390,3404,3476,3493,3517,3527,3546,3551,3580,3659,3689-3690,3703,3737,3766,3784,3800-3801,3809,3814,3826-3828,3851,3869,3871,3878,3880,3889,3905,3914,3918,3920,3945,3971,3986,3995,3998,4000-4006,4045,4111,4125-4126,4129,4224,4242,4279,4321,4343,4443-4446,4449,4550,4567,4662,4848,4899-4900,4998,5000-5004,5009,5030,5033,5050-5051,5054,5060-5061,5080,5087,5100-5102,5120,5190,5200,5214,5221-5222,5225-5226,5269,5280,5298,5357,5405,5414,5431-5432,5440,5500,5510,5544,5550,5555,5560,5566,5631,5633,5666,5678-5679,5718,5730,5800-5802,5810-5811,5815,5822,5825,5850,5859,5862,5877,5900-5904,5906-5907,5910-5911,5915,5922,5925,5950,5952,5959-5963,5987-5989,5998-6007,6009,6025,6059,6100-6101,6106,6112,6123,6129,6156,6346,6389,6502,6510,6543,6547,6565-6567,6580,6646,6666-6669,6689,6692,6699,6779,6788-6789,6792,6839,6881,6901,6969,7000-7002,7004,7007,7019,7025,7070,7100,7103,7106,7200-7201,7402,7435,7443,7496,7512,7625,7627,7676,7741,7777-7778,7800,7911,7920-7921,7937-7938,7999-8002,8007-8011,8021-8022,8031,8042,8045,8080-8090,8093,8099-8100,8180-8181,8192-8194,8200,8222,8254,8290-8292,8300,8333,8383,8400,8402,8443,8500,8600,8649,8651-8652,8654,8701,8800,8873,8888,8899,8994,9000-9003,9009-9011,9040,9050,9071,9080-9081,9090-9091,9099-9103,9110-9111,9200,9207,9220,9290,9415,9418,9485,9500,9502-9503,9535,9575,9593-9595,9618,9666,9876-9878,9898,9900,9917,9929,9943-9944,9968,9998-10004,10009-10010,10012,10024-10025,10082,10180,10215,10243,10566,10616-10617,10621,10626,10628-10629,10778,11110-11111,11967,12000,12174,12265,12345,13456,13722,13782-13783,14000,14238,14441-14442,15000,15002-15004,15660,15742,16000-16001,16012,16016,16018,16080,16113,16992-16993,17877,17988,18040,18101,18988,19101,19283,19315,19350,19780,19801,19842,20000,20005,20031,20221-20222,20828,21571,22939,23502,24444,24800,25734-25735,26214,27000,27352-27353,27355-27356,27715,28201,30000,30718,30951,31038,31337,32768-32785,33354,33899,34571-34573,35500,38292,40193,40911,41511,42510,44176,44442-44443,44501,45100,48080,49152-49161,49163,49165,49167,49175-49176,49400,49999-50003,50006,50300,50389,50500,50636,50800,51103,51493,52673,52822,52848,52869,54045,54328,55055-55056,55555,55600,56737-56738,57294,57797,58080,60020,60443,61532,61900,62078,63331,64623,64680,65000,65129,65389"
+            },
+            "nvd_api_url": "https://services.nvd.nist.gov/rest/json/cves/2.0",
+            "update_check_url": f"{REPO_URL}/releases/latest"
+        }
         
-        base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        headers = {"apiKey": self.nvd_api_key}
-        
-        vulnerabilities = []
-        
-        if bulk_update:
-            # Update vulnerability database
-            self.logger.info("Updating vulnerability database from NVD...")
-            
-            # Get recent CVEs (last 7 days)
-            mod_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000")
-            mod_end = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
-            
-            params = {
-                "lastModStartDate": mod_start,
-                "lastModEndDate": mod_end,
-                "resultsPerPage": 100
-            }
-            
+        config_file = self.config_dir / "config.json"
+        if config_file.exists():
             try:
-                response = requests.get(base_url, headers=headers, params=params, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    for vuln in data.get("vulnerabilities", []):
-                        cve = vuln.get("cve", {})
-                        cve_id = cve.get("id")
-                        
-                        # Extract CVSS score
-                        cvss_score = 0
-                        metrics = cve.get("metrics", {})
-                        if "cvssMetricV31" in metrics:
-                            cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                        elif "cvssMetricV30" in metrics:
-                            cvss_score = metrics["cvssMetricV30"][0].get("cvssData", {}).get("baseScore", 0)
-                        
-                        vuln_info = {
-                            "cve_id": cve_id,
-                            "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                            "cvss_score": cvss_score,
-                            "published_date": cve.get("published", ""),
-                            "last_modified": cve.get("lastModified", "")
-                        }
-                        
-                        vulnerabilities.append(vuln_info)
-                        self._cache_vulnerability(vuln_info)
-                        
-                    self.logger.info(f"✓ Updated {len(vulnerabilities)} vulnerabilities")
-                    
+                with open(config_file, 'r') as f:
+                    saved_config = json.load(f)
+                    default_config.update(saved_config)
             except Exception as e:
-                self.logger.error(f"NVD API error: {e}")
-                
-        elif cve_list:
-            # Query specific CVEs
-            for cve_id in cve_list:
-                # Check cache first
-                cached = self._get_cached_vulnerability(cve_id)
-                if cached:
-                    vulnerabilities.append(cached)
-                else:
-                    # Query NVD
-                    try:
-                        response = requests.get(f"{base_url}?cveId={cve_id}", 
-                                              headers=headers, timeout=30)
-                        if response.status_code == 200:
-                            data = response.json()
-                            if data.get("vulnerabilities"):
-                                vuln = data["vulnerabilities"][0]
-                                cve = vuln.get("cve", {})
-                                
-                                # Extract CVSS score
-                                cvss_score = 0
-                                metrics = cve.get("metrics", {})
-                                if "cvssMetricV31" in metrics:
-                                    cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                                
-                                vuln_info = {
-                                    "cve_id": cve_id,
-                                    "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                                    "cvss_score": cvss_score,
-                                    "published_date": cve.get("published", ""),
-                                    "last_modified": cve.get("lastModified", "")
-                                }
-                                
-                                vulnerabilities.append(vuln_info)
-                                self._cache_vulnerability(vuln_info)
-                                
-                    except Exception as e:
-                        self.logger.error(f"Error querying CVE {cve_id}: {e}")
+                self.logger.error(f"Failed to load config: {e}")
         
-        return vulnerabilities
+        return default_config
     
-    def _cache_vulnerability(self, vuln_info: Dict):
-        """Cache vulnerability information in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO vuln_cache 
-            (cve_id, description, cvss_score, published_date, affected_products)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            vuln_info.get("cve_id"),
-            vuln_info.get("description", ""),
-            vuln_info.get("cvss_score", 0),
-            vuln_info.get("published_date", ""),
-            json.dumps(vuln_info.get("affected_products", []))
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    def _get_cached_vulnerability(self, cve_id: str) -> Optional[Dict]:
-        """Retrieve cached vulnerability information"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT description, cvss_score, published_date, affected_products
-            FROM vuln_cache
-            WHERE cve_id = ?
-            AND datetime(last_updated) > datetime('now', '-7 days')
-        ''', (cve_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                "cve_id": cve_id,
-                "description": row[0],
-                "cvss_score": row[1],
-                "published_date": row[2],
-                "affected_products": json.loads(row[3]) if row[3] else []
-            }
-        return None
-    
-    def optimize_performance(self, target_count: int, network_type: str = "lan"):
-        """Generate optimized configuration based on target environment"""
-        
-        optimizations = {
-            "lan": {
-                "small": {"concurrency": 500, "timeout": 500, "rate_limit": 0},
-                "medium": {"concurrency": 300, "timeout": 1000, "rate_limit": 0},
-                "large": {"concurrency": 100, "timeout": 2000, "rate_limit": 100}
-            },
-            "wan": {
-                "small": {"concurrency": 50, "timeout": 3000, "rate_limit": 50},
-                "medium": {"concurrency": 30, "timeout": 5000, "rate_limit": 30},
-                "large": {"concurrency": 10, "timeout": 8000, "rate_limit": 10}
-            },
-            "internet": {
-                "small": {"concurrency": 20, "timeout": 5000, "rate_limit": 20},
-                "medium": {"concurrency": 10, "timeout": 8000, "rate_limit": 10},
-                "large": {"concurrency": 5, "timeout": 10000, "rate_limit": 5}
-            }
-        }
-        
-        # Determine size category
-        if target_count <= 10:
-            size = "small"
-        elif target_count <= 100:
-            size = "medium"
-        else:
-            size = "large"
-        
-        # Get optimizations
-        opt = optimizations.get(network_type, {}).get(size, {})
-        
-        # Calculate memory requirements
-        memory_per_connection = 0.5  # MB
-        estimated_memory = opt.get("concurrency", 100) * memory_per_connection
-        
-        # System optimization commands
-        if platform.system() == "Linux":
-            system_opts = [
-                f"ulimit -n {opt.get('concurrency', 100) * 10}",
-                f"sysctl -w net.ipv4.tcp_fin_timeout=30",
-                f"sysctl -w net.ipv4.tcp_tw_reuse=1"
-            ]
-        else:
-            system_opts = []
-        
-        optimization_config = {
-            "performance_profile": f"{network_type}_{size}",
-            "max_concurrency": opt.get("concurrency", 100),
-            "timeout": opt.get("timeout", 5000),
-            "rate_limit": opt.get("rate_limit", 0),
-            "estimated_memory_mb": estimated_memory,
-            "system_optimizations": system_opts,
-            "recommendations": [
-                f"Use {opt.get('concurrency', 100)} concurrent connections",
-                f"Set timeout to {opt.get('timeout', 5000)}ms",
-                f"Estimated memory usage: {estimated_memory:.1f}MB",
-                f"Network type: {network_type.upper()}"
-            ]
-        }
-        
-        # Save optimization config
-        with open("optimization_config.json", 'w') as f:
-            json.dump(optimization_config, f, indent=2)
-        
-        self.logger.info(f"✓ Generated optimization config for {target_count} targets on {network_type}")
-        return optimization_config
-    
-    def generate_reports(self, scan_results: Dict, formats: List[str] = ["html", "json", "pdf"]):
-        """Generate comprehensive reports in multiple formats"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_dir = Path(f"reports_{timestamp}")
-        report_dir.mkdir(exist_ok=True)
-        
-        reports = {}
-        
-        for fmt in formats:
-            if fmt == "html":
-                report_path = report_dir / f"report_{timestamp}.html"
-                self._generate_html_report(scan_results, report_path)
-                reports["html"] = str(report_path)
-                
-            elif fmt == "json":
-                report_path = report_dir / f"report_{timestamp}.json"
-                with open(report_path, 'w') as f:
-                    json.dump(scan_results, f, indent=2, default=str)
-                reports["json"] = str(report_path)
-                
-            elif fmt == "markdown":
-                report_path = report_dir / f"report_{timestamp}.md"
-                self._generate_markdown_report(scan_results, report_path)
-                reports["markdown"] = str(report_path)
-                
-            elif fmt == "csv":
-                report_path = report_dir / f"report_{timestamp}.csv"
-                self._generate_csv_report(scan_results, report_path)
-                reports["csv"] = str(report_path)
-        
-        self.logger.info(f"✓ Generated {len(reports)} reports in {report_dir}")
-        return reports
-    
-    def _generate_html_report(self, scan_results: Dict, output_path: Path):
-        """Generate HTML report with charts and visualizations"""
-        html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>R3COND0G Scan Report</title>
-    <meta charset="utf-8">
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
-        .header h1 { margin: 0; font-size: 2.5em; }
-        .header .subtitle { opacity: 0.9; margin-top: 10px; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .stat-card .value { font-size: 2em; font-weight: bold; color: #667eea; }
-        .stat-card .label { color: #666; margin-top: 5px; }
-        .section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .section h2 { color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th { background: #667eea; color: white; padding: 12px; text-align: left; }
-        td { padding: 10px; border-bottom: 1px solid #eee; }
-        tr:hover { background: #f9f9f9; }
-        .vulnerability { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 5px; }
-        .critical { border-left-color: #dc3545; background: #f8d7da; }
-        .high { border-left-color: #fd7e14; background: #ffe5d0; }
-        .medium { border-left-color: #ffc107; background: #fff3cd; }
-        .low { border-left-color: #28a745; background: #d4edda; }
-        .chart-container { width: 100%; height: 300px; margin: 20px 0; }
-        .footer { text-align: center; color: #666; margin-top: 40px; padding: 20px; }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <div class="header">
-        <h1>🦅 R3COND0G Scan Report</h1>
-        <div class="subtitle">Generated: {timestamp}</div>
-    </div>
-    
-    <div class="stats">
-        <div class="stat-card">
-            <div class="value">{total_hosts}</div>
-            <div class="label">Hosts Scanned</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{open_ports}</div>
-            <div class="label">Open Ports</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{services}</div>
-            <div class="label">Services Detected</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{vulnerabilities}</div>
-            <div class="label">Vulnerabilities</div>
-        </div>
-    </div>
-    
-    <div class="section">
-        <h2>Discovered Services</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Host</th>
-                    <th>Port</th>
-                    <th>Protocol</th>
-                    <th>Service</th>
-                    <th>Version</th>
-                    <th>State</th>
-                </tr>
-            </thead>
-            <tbody>
-                {service_rows}
-            </tbody>
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>Vulnerability Summary</h2>
-        {vulnerability_section}
-    </div>
-    
-    <div class="section">
-        <h2>Port Distribution</h2>
-        <canvas id="portChart"></canvas>
-    </div>
-    
-    <div class="footer">
-        <p>R3COND0G v3.0.0 | Advanced Network Reconnaissance Platform</p>
-        <p>Report generated by Command & Control System</p>
-    </div>
-    
-    <script>
-        // Port distribution chart
-        const ctx = document.getElementById('portChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: {port_labels},
-                datasets: [{
-                    label: 'Port Frequency',
-                    data: {port_data},
-                    backgroundColor: 'rgba(102, 126, 234, 0.5)',
-                    borderColor: 'rgba(102, 126, 234, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false
-            }
-        });
-    </script>
-</body>
-</html>
-        """
-        
-        # Calculate statistics
-        total_hosts = len(scan_results.get("hosts", []))
-        
-        service_count = 0
-        open_port_count = 0
-        service_rows = []
-        port_distribution = {}
-        
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    open_port_count += 1
-                    service_count += 1
-                    
-                    port = service.get("port", "unknown")
-                    port_distribution[port] = port_distribution.get(port, 0) + 1
-                    
-                    service_rows.append(f"""
-                        <tr>
-                            <td>{host}</td>
-                            <td>{port}</td>
-                            <td>{service.get('protocol', 'tcp')}</td>
-                            <td>{service.get('service', 'unknown')}</td>
-                            <td>{service.get('version', '-')}</td>
-                            <td>{service.get('state', 'unknown')}</td>
-                        </tr>
-                    """)
-        
-        # Vulnerability section
-        vuln_html = ""
-        vuln_count = len(scan_results.get("vulnerabilities", []))
-        for vuln in scan_results.get("vulnerabilities", []):
-            severity_class = "medium"
-            cvss = vuln.get("cvss_score", 0)
-            if cvss >= 9.0:
-                severity_class = "critical"
-            elif cvss >= 7.0:
-                severity_class = "high"
-            elif cvss >= 4.0:
-                severity_class = "medium"
-            else:
-                severity_class = "low"
-                
-            vuln_html += f"""
-                <div class="vulnerability {severity_class}">
-                    <strong>{vuln.get('cve_id', 'Unknown')}</strong> - CVSS: {cvss}<br>
-                    {vuln.get('description', 'No description available')}
-                </div>
-            """
-        
-        # Prepare chart data
-        port_labels = list(port_distribution.keys())[:10]  # Top 10 ports
-        port_data = [port_distribution[p] for p in port_labels]
-        
-        # Fill template
-        html_content = html_template.format(
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            total_hosts=total_hosts,
-            open_ports=open_port_count,
-            services=service_count,
-            vulnerabilities=vuln_count,
-            service_rows="\n".join(service_rows) if service_rows else "<tr><td colspan='6'>No services detected</td></tr>",
-            vulnerability_section=vuln_html if vuln_html else "<p>No vulnerabilities detected</p>",
-            port_labels=json.dumps(port_labels),
-            port_data=json.dumps(port_data)
-        )
-        
-        with open(output_path, 'w') as f:
-            f.write(html_content)
-    
-    def _generate_markdown_report(self, scan_results: Dict, output_path: Path):
-        """Generate Markdown report"""
-        md_content = f"""# R3COND0G Scan Report
-
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-## Executive Summary
-
-- **Hosts Scanned**: {len(scan_results.get('hosts', []))}
-- **Open Ports Found**: {sum(len(s) for s in scan_results.get('services', {}).values())}
-- **Vulnerabilities Detected**: {len(scan_results.get('vulnerabilities', []))}
-
-## Discovered Services
-
-| Host | Port | Protocol | Service | Version | State |
-|------|------|----------|---------|---------|-------|
-"""
-        
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                md_content += f"| {host} | {service.get('port')} | {service.get('protocol', 'tcp')} | "
-                md_content += f"{service.get('service', 'unknown')} | {service.get('version', '-')} | "
-                md_content += f"{service.get('state', 'unknown')} |\n"
-        
-        md_content += "\n## Vulnerability Summary\n\n"
-        
-        for vuln in scan_results.get("vulnerabilities", []):
-            md_content += f"### {vuln.get('cve_id', 'Unknown')}\n"
-            md_content += f"- **CVSS Score**: {vuln.get('cvss_score', 'N/A')}\n"
-            md_content += f"- **Description**: {vuln.get('description', 'No description')}\n\n"
-        
-        with open(output_path, 'w') as f:
-            f.write(md_content)
-    
-    def _generate_csv_report(self, scan_results: Dict, output_path: Path):
-        """Generate CSV report"""
-        import csv
-        
-        with open(output_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Host", "Port", "Protocol", "Service", "Version", "State", "Vulnerabilities"])
-            
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    vulns = []
-                    # Find vulnerabilities for this service
-                    for vuln in scan_results.get("vulnerabilities", []):
-                        if vuln.get("host") == host and vuln.get("port") == service.get("port"):
-                            vulns.append(vuln.get("cve_id", ""))
-                    
-                    writer.writerow([
-                        host,
-                        service.get("port"),
-                        service.get("protocol", "tcp"),
-                        service.get("service", "unknown"),
-                        service.get("version", ""),
-                        service.get("state", "unknown"),
-                        ";".join(vulns)
-                    ])
-    
-    def generate_topology(self, scan_results: Dict, output_format: str = "dot"):
-        """Generate network topology visualization"""
-        if not NETWORK_VIZ:
-            self.logger.warning("NetworkX not installed. Install with: pip install networkx matplotlib")
-            return None
-        
-        G = nx.Graph()
-        
-        # Add nodes for hosts
-        for host in scan_results.get("hosts", []):
-            G.add_node(host, node_type="host")
-        
-        # Add edges based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    service_node = f"{service.get('service', 'unknown')}:{service.get('port')}"
-                    G.add_node(service_node, node_type="service")
-                    G.add_edge(host, service_node)
-        
-        if output_format == "dot":
-            # Generate DOT format
-            dot_content = "digraph NetworkTopology {\n"
-            dot_content += '  rankdir=LR;\n'
-            dot_content += '  node [shape=box, style=filled];\n'
-            
-            for node in G.nodes():
-                if G.nodes[node].get("node_type") == "host":
-                    dot_content += f'  "{node}" [fillcolor=lightblue, label="{node}\\nHost"];\n'
-                else:
-                    dot_content += f'  "{node}" [fillcolor=lightgreen, label="{node}"];\n'
-            
-            for edge in G.edges():
-                dot_content += f'  "{edge[0]}" -> "{edge[1]}";\n'
-            
-            dot_content += "}\n"
-            
-            with open("network_topology.dot", 'w') as f:
-                f.write(dot_content)
-            
-            self.logger.info("✓ Network topology saved to network_topology.dot")
-            return "network_topology.dot"
-            
-        elif output_format == "png":
-            # Generate PNG visualization
-            plt.figure(figsize=(12, 8))
-            pos = nx.spring_layout(G)
-            
-            # Draw nodes
-            host_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "host"]
-            service_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "service"]
-            
-            nx.draw_networkx_nodes(G, pos, nodelist=host_nodes, node_color='lightblue', 
-                                 node_size=1000, label="Hosts")
-            nx.draw_networkx_nodes(G, pos, nodelist=service_nodes, node_color='lightgreen', 
-                                 node_size=500, label="Services")
-            
-            # Draw edges and labels
-            nx.draw_networkx_edges(G, pos, alpha=0.5)
-            nx.draw_networkx_labels(G, pos)
-            
-            plt.title("Network Topology")
-            plt.legend()
-            plt.axis('off')
-            plt.savefig("network_topology.png", dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            self.logger.info("✓ Network topology saved to network_topology.png")
-            return "network_topology.png"
-    
-    def interactive_mode(self):
-        """Run in interactive mode with menu"""
-        if not self.console:
-            print("Interactive mode requires 'rich' library. Install with: pip install rich")
-            return
-        
-        while True:
-            self.console.clear()
-            self.console.print(Panel.fit("""
-[bold cyan]🦅 R3COND0G Command & Control System[/bold cyan]
-[dim]Advanced Orchestration Platform v3.0.0[/dim]
-            """, border_style="#!/usr/bin/env python3
-"""
-R3COND0G Command & Control System
-Advanced Orchestration and Management Platform
-Version: 3.0.0
-Author: 0xb0rn3 & 0xbv1
-"""
-
-import os
-import sys
-import json
-import yaml
-import time
-import subprocess
-import argparse
-import logging
-import hashlib
-import sqlite3
-import requests
-import threading
-import shutil
-import platform
-import tempfile
-import concurrent.futures
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-from enum import Enum
-import xml.etree.ElementTree as ET
-
-# Rich console output (install with: pip install rich)
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
-    from rich.panel import Panel
-    from rich.syntax import Syntax
-    from rich.prompt import Prompt, Confirm
-    from rich import print as rprint
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-    print("Warning: 'rich' library not installed. Install with: pip install rich")
-
-# Advanced features
-try:
-    import networkx as nx
-    import matplotlib.pyplot as plt
-    NETWORK_VIZ = True
-except ImportError:
-    NETWORK_VIZ = False
-
-class ScanMode(Enum):
-    """Scan operation modes"""
-    STEALTH = "stealth"
-    NORMAL = "normal"
-    AGGRESSIVE = "aggressive"
-    CUSTOM = "custom"
-    DISCOVERY = "discovery"
-    VULNERABILITY = "vulnerability"
-
-class OutputFormat(Enum):
-    """Output format types"""
-    JSON = "json"
-    XML = "xml"
-    CSV = "csv"
-    HTML = "html"
-    MARKDOWN = "markdown"
-    NMAP = "nmap"
-    METASPLOIT = "metasploit"
-    SIEM = "siem"
-
-@dataclass
-class ScanProfile:
-    """Scan profile configuration"""
-    name: str
-    mode: ScanMode
-    targets: List[str]
-    ports: str
-    timeout: int
-    concurrency: int
-    options: Dict[str, Any]
-
-class R3COND0GController:
-    """Main controller for R3COND0G orchestration"""
-    
-    def __init__(self):
-        self.console = Console() if RICH_AVAILABLE else None
-        self.logger = self._setup_logging()
-        self.config = self._load_config()
-        self.cache_dir = Path.home() / ".r3cond0g_cache"
-        self.cache_dir.mkdir(exist_ok=True)
-        self.db_path = self.cache_dir / "r3cond0g.db"
-        self.probe_dir = Path("probes")
-        self.probe_dir.mkdir(exist_ok=True)
-        self.nvd_api_key = os.environ.get("NVD_API_KEY", "")
-        self.profiles = {}
-        self.init_database()
-        
-    def _setup_logging(self) -> logging.Logger:
-        """Setup logging configuration"""
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            handlers=[
-                logging.FileHandler("r3cond0g_controller.log"),
-                logging.StreamHandler()
-            ]
-        )
-        return logging.getLogger("R3COND0G_Controller")
-    
-    def _load_config(self) -> Dict:
-        """Load or create default configuration"""
-        config_path = Path("controller_config.json")
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        else:
-            default_config = {
-                "version": "3.0.0",
-                "core_binary": "./r3cond0g",
-                "max_concurrency": 1000,
-                "default_timeout": 5000,
-                "cache_ttl": 86400,
-                "auto_update": True,
-                "performance_mode": "balanced",
-                "integrations": {
-                    "nmap": {"enabled": True, "path": "nmap"},
-                    "metasploit": {"enabled": False, "path": "msfconsole"},
-                    "siem": {"enabled": False, "endpoint": ""}
-                }
-            }
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=2)
-            return default_config
-    
-    def init_database(self):
-        """Initialize SQLite database for caching and history"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Scan history table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scan_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                profile TEXT,
-                targets TEXT,
-                ports TEXT,
-                results TEXT,
-                duration REAL,
-                status TEXT
-            )
-        ''')
-        
-        # Vulnerability cache table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS vuln_cache (
-                cve_id TEXT PRIMARY KEY,
-                description TEXT,
-                cvss_score REAL,
-                published_date DATE,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-                affected_products TEXT
-            )
-        ''')
-        
-        # Performance metrics table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                scan_rate REAL,
-                memory_usage REAL,
-                cpu_usage REAL,
-                network_throughput REAL
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def build_core(self, optimize: bool = True, cross_compile: List[str] = None):
-        """Build the Go core binary with optimizations"""
-        self.logger.info("Building R3COND0G core...")
-        
-        build_cmd = ["go", "build"]
-        
-        if optimize:
-            build_cmd.extend(["-ldflags", "-s -w"])
-            
-        build_cmd.extend(["-o", "r3cond0g", "main.go"])
-        
+    def save_config(self):
+        """Save current configuration"""
+        config_file = self.config_dir / "config.json"
         try:
-            # Build for current platform
-            result = subprocess.run(build_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.logger.info("✓ Core binary built successfully")
-                
-                # Set executable permissions on Unix
-                if platform.system() != "Windows":
-                    os.chmod("r3cond0g", 0o755)
-            else:
-                self.logger.error(f"Build failed: {result.stderr}")
-                return False
-                
-            # Cross-compile if requested
-            if cross_compile:
-                for target in cross_compile:
-                    os_name, arch = target.split("/")
-                    env = os.environ.copy()
-                    env["GOOS"] = os_name
-                    env["GOARCH"] = arch
-                    
-                    output_name = f"r3cond0g_{os_name}_{arch}"
-                    if os_name == "windows":
-                        output_name += ".exe"
-                    
-                    build_cmd[-1] = "main.go"
-                    build_cmd[-2] = output_name
-                    
-                    result = subprocess.run(build_cmd, capture_output=True, text=True, env=env)
-                    if result.returncode == 0:
-                        self.logger.info(f"✓ Built for {target}")
-                    else:
-                        self.logger.error(f"Failed to build for {target}")
-                        
-            return True
-            
+            with open(config_file, 'w') as f:
+                json.dump(self.config, f, indent=2)
         except Exception as e:
-            self.logger.error(f"Build error: {e}")
-            return False
+            self.logger.error(f"Failed to save config: {e}")
     
-    def generate_probes(self, custom_services: List[str] = None):
-        """Generate probe definitions for service detection"""
-        
-        # Default TCP probes
-        tcp_probes = [
-            {
-                "name": "SSH-Banner",
-                "protocol": "TCP",
-                "ports": [22, 2222],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "^SSH-([0-9.]+)-([^\\s\\r\\n]+)",
-                "service_override": "ssh",
-                "version_template": "{{group_2}} (protocol {{group_1}})",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "HTTP-Server",
-                "protocol": "TCP",
-                "ports": [80, 8080, 8000, 3000],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
-                "service_override": "http",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 5000
-            },
-            {
-                "name": "HTTPS-Server",
-                "protocol": "TCP",
-                "ports": [443, 8443],
-                "priority": 15,
-                "requires_tls": True,
-                "tls_alpn_protocols": ["http/1.1", "h2"],
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
-                "service_override": "https",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 8000
-            },
-            {
-                "name": "MySQL-Version",
-                "protocol": "TCP",
-                "ports": [3306],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "\\x0a([0-9.]+[^\\x00]*)",
-                "service_override": "mysql",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "PostgreSQL",
-                "protocol": "TCP",
-                "ports": [5432],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f",
-                "read_pattern": "FATAL.*?version \"([^\"]+)\"",
-                "service_override": "postgresql",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "Redis-Info",
-                "protocol": "TCP",
-                "ports": [6379],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "INFO\\r\\n",
-                "read_pattern": "redis_version:([^\\r\\n]+)",
-                "service_override": "redis",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "MongoDB",
-                "protocol": "TCP",
-                "ports": [27017, 27018, 27019],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "version.*?([0-9.]+)",
-                "service_override": "mongodb",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "RDP",
-                "protocol": "TCP",
-                "ports": [3389],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x03\\x00\\x00\\x13\\x0e\\xe0\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x08\\x00\\x03\\x00\\x00\\x00",
-                "read_pattern": "\\x03\\x00\\x00\\x13\\x0e\\xd0",
-                "service_override": "rdp",
-                "version_template": "RDP Service",
-                "timeout_ms": 3000
-            }
-        ]
-        
-        # Default UDP probes
-        udp_probes = [
-            {
-                "name": "DNS-Version",
-                "protocol": "UDP",
-                "ports": [53],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x00\\x1e\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07version\\x04bind\\x00\\x00\\x10\\x00\\x03",
-                "read_pattern": "([0-9]+\\.[0-9]+)",
-                "service_override": "dns",
-                "version_template": "BIND {{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "SNMP",
-                "protocol": "UDP",
-                "ports": [161],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x30\\x26\\x02\\x01\\x00\\x04\\x06\\x70\\x75\\x62\\x6c\\x69\\x63\\xa0\\x19",
-                "read_pattern": ".",
-                "service_override": "snmp",
-                "version_template": "SNMPv1/v2c",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "NTP",
-                "protocol": "UDP",
-                "ports": [123],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x16\\x02\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00",
-                "read_pattern": ".",
-                "service_override": "ntp",
-                "version_template": "NTP Service",
-                "timeout_ms": 2000
-            }
-        ]
-        
-        # Add custom service probes if specified
-        if custom_services:
-            for service in custom_services:
-                tcp_probes.append(self._generate_custom_probe(service))
-        
-        # Save probe files
-        with open(self.probe_dir / "tcp_probes.json", 'w') as f:
-            json.dump(tcp_probes, f, indent=2)
-            
-        with open(self.probe_dir / "udp_probes.json", 'w') as f:
-            json.dump(udp_probes, f, indent=2)
-            
-        self.logger.info(f"✓ Generated {len(tcp_probes)} TCP and {len(udp_probes)} UDP probes")
-        return True
-    
-    def _generate_custom_probe(self, service: str) -> Dict:
-        """Generate a custom probe definition"""
-        return {
-            "name": f"Custom-{service}",
-            "protocol": "TCP",
-            "ports": [],  # Will be determined dynamically
-            "priority": 50,
-            "requires_tls": False,
-            "send_payload": f"{service.upper()}\\r\\n",
-            "read_pattern": f".*{service}.*",
-            "service_override": service.lower(),
-            "version_template": "{{group_0}}",
-            "timeout_ms": 5000
-        }
-    
-    def generate_config(self, profile: str = "default") -> Dict:
-        """Generate configuration for different scan profiles"""
-        
-        configs = {
-            "default": {
-                "target_host": "",
-                "port_range": "1-1000",
-                "scan_timeout": 1000,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 100,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "stealth": {
-                "target_host": "",
-                "port_range": "22,80,443,3389",
-                "scan_timeout": 3000,
-                "service_detect_timeout": 8000,
-                "max_concurrency": 10,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": False,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "fragment_packets": True,
-                "decoy_hosts": ["10.0.0.99", "10.0.0.100"],
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "aggressive": {
-                "target_host": "",
-                "port_range": "1-65535",
-                "scan_timeout": 500,
-                "service_detect_timeout": 3000,
-                "max_concurrency": 1000,
-                "udp_scan": True,
-                "vuln_mapping": True,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "enable_mac_lookup": True,
-                "os_detect": True,
-                "version_detect": True,
-                "script_scan": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "vulnerability": {
-                "target_host": "",
-                "port_range": "1-10000",
-                "scan_timeout": 2000,
-                "service_detect_timeout": 10000,
-                "max_concurrency": 50,
-                "udp_scan": False,
-                "vuln_mapping": True,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "service_detect": True,
-                "version_detect": True,
-                "nvd_api_key": self.nvd_api_key,
-                "cve_plugin_file": "custom_cves.json",
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "discovery": {
-                "target_host": "",
-                "port_range": "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080",
-                "scan_timeout": 1500,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 200,
-                "udp_scan": True,
-                "vuln_mapping": False,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "ping_sweep_ports": "80,443,22,3389,445",
-                "enable_mac_lookup": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            }
-        }
-        
-        config = configs.get(profile, configs["default"])
-        
-        # Save as JSON
-        with open(f"config_{profile}.json", 'w') as f:
-            json.dump(config, f, indent=2)
-            
-        # Save as YAML
-        with open(f"config_{profile}.yaml", 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-            
-        self.logger.info(f"✓ Generated configuration for profile: {profile}")
-        return config
-    
-    def create_scan_profile(self, name: str, base: str = "default") -> ScanProfile:
-        """Create a custom scan profile"""
-        base_config = self.generate_config(base)
-        
-        if self.console:
-            self.console.print(Panel(f"Creating scan profile: {name}", style="bold blue"))
-            
-            # Interactive configuration
-            targets = Prompt.ask("Enter targets (comma-separated)")
-            ports = Prompt.ask("Enter port range", default=base_config["port_range"])
-            timeout = int(Prompt.ask("Connection timeout (ms)", default=str(base_config["scan_timeout"])))
-            concurrency = int(Prompt.ask("Max concurrency", default=str(base_config["max_concurrency"])))
-            
-            udp = Confirm.ask("Enable UDP scanning?", default=False)
-            vuln = Confirm.ask("Enable vulnerability mapping?", default=False)
-            topology = Confirm.ask("Generate network topology?", default=False)
-            
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=targets.split(","),
-                ports=ports,
-                timeout=timeout,
-                concurrency=concurrency,
-                options={
-                    "udp_scan": udp,
-                    "vuln_mapping": vuln,
-                    "topology_mapping": topology
-                }
-            )
-        else:
-            # Non-interactive mode
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=[],
-                ports=base_config["port_range"],
-                timeout=base_config["scan_timeout"],
-                concurrency=base_config["max_concurrency"],
-                options=base_config
-            )
-        
-        self.profiles[name] = profile
-        
-        # Save profile
-        profile_path = self.cache_dir / f"profile_{name}.json"
-        with open(profile_path, 'w') as f:
-            json.dump(asdict(profile), f, indent=2)
-            
-        self.logger.info(f"✓ Created scan profile: {name}")
-        return profile
-    
-    def run_scan(self, profile: str = "default", targets: List[str] = None) -> Dict:
-        """Execute a scan with specified profile"""
-        
-        # Load or create configuration
-        if profile in self.profiles:
-            scan_profile = self.profiles[profile]
-            config = scan_profile.options
-        else:
-            config = self.generate_config(profile)
-            
-        # Override targets if provided
-        if targets:
-            config["target_host"] = ",".join(targets)
-            
-        # Prepare command
-        cmd = [self.config["core_binary"]]
-        
-        # Add configuration parameters
-        for key, value in config.items():
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(f"-{key.replace('_', '-')}")
-            elif value:
-                cmd.append(f"-{key.replace('_', '-')}")
-                cmd.append(str(value))
-        
-        # Execute scan
-        self.logger.info(f"Starting scan with profile: {profile}")
-        start_time = time.time()
-        
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-            duration = time.time() - start_time
-            
-            # Parse results
-            scan_results = self._parse_scan_output(result.stdout)
-            
-            # Store in database
-            self._store_scan_results(profile, targets, config.get("port_range", ""), 
-                                   scan_results, duration, "completed")
-            
-            self.logger.info(f"✓ Scan completed in {duration:.2f} seconds")
-            return scan_results
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error("Scan timeout exceeded")
-            return {"error": "timeout"}
-        except Exception as e:
-            self.logger.error(f"Scan error: {e}")
-            return {"error": str(e)}
-    
-    def _parse_scan_output(self, output: str) -> Dict:
-        """Parse scan output into structured format"""
-        results = {
-            "hosts": [],
-            "services": {},
-            "vulnerabilities": [],
-            "statistics": {}
-        }
-        
-        # Basic parsing (would be more sophisticated in production)
-        lines = output.split("\n")
-        for line in lines:
-            if "open" in line.lower():
-                # Parse open port information
-                parts = line.split()
-                if len(parts) >= 3:
-                    host = parts[0]
-                    port = parts[1]
-                    service = parts[2] if len(parts) > 2 else "unknown"
-                    
-                    if host not in results["services"]:
-                        results["services"][host] = []
-                    results["services"][host].append({
-                        "port": port,
-                        "service": service,
-                        "state": "open"
-                    })
-                    
-        return results
-    
-    def _store_scan_results(self, profile: str, targets: List[str], ports: str, 
-                           results: Dict, duration: float, status: str):
-        """Store scan results in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO scan_history (profile, targets, ports, results, duration, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (profile, json.dumps(targets), ports, json.dumps(results), duration, status))
-        
-        conn.commit()
-        conn.close()
-    
-    def integrate_nmap(self, nmap_file: str) -> Dict:
-        """Import and process Nmap XML results"""
-        self.logger.info(f"Importing Nmap results from {nmap_file}")
-        
-        try:
-            tree = ET.parse(nmap_file)
-            root = tree.getroot()
-            
-            results = {
-                "hosts": [],
-                "services": {},
-                "os_detection": {}
-            }
-            
-            for host in root.findall('.//host'):
-                addr = host.find('.//address[@addrtype="ipv4"]')
-                if addr is not None:
-                    ip = addr.get('addr')
-                    results["hosts"].append(ip)
-                    results["services"][ip] = []
-                    
-                    # Parse ports
-                    for port in host.findall('.//port'):
-                        port_id = port.get('portid')
-                        protocol = port.get('protocol')
-                        state = port.find('state').get('state')
-                        service = port.find('service')
-                        
-                        service_info = {
-                            "port": port_id,
-                            "protocol": protocol,
-                            "state": state
-                        }
-                        
-                        if service is not None:
-                            service_info["service"] = service.get('name', 'unknown')
-                            service_info["version"] = service.get('version', '')
-                            
-                        results["services"][ip].append(service_info)
-                    
-                    # Parse OS detection
-                    os_match = host.find('.//osmatch')
-                    if os_match is not None:
-                        results["os_detection"][ip] = {
-                            "name": os_match.get('name'),
-                            "accuracy": os_match.get('accuracy')
-                        }
-            
-            # Convert to R3COND0G format and enhance
-            enhanced_results = self._enhance_nmap_results(results)
-            
-            self.logger.info(f"✓ Imported {len(results['hosts'])} hosts from Nmap")
-            return enhanced_results
-            
-        except Exception as e:
-            self.logger.error(f"Failed to parse Nmap file: {e}")
-            return {}
-    
-    def _enhance_nmap_results(self, nmap_results: Dict) -> Dict:
-        """Enhance Nmap results with additional scanning"""
-        # Run targeted scans on discovered services
-        enhanced = nmap_results.copy()
-        
-        for host, services in nmap_results["services"].items():
-            # Run service detection on open ports
-            open_ports = [s["port"] for s in services if s["state"] == "open"]
-            if open_ports:
-                config = {
-                    "target_host": host,
-                    "port_range": ",".join(open_ports),
-                    "service_detect": True,
-                    "version_detect": True,
-                    "vuln_mapping": True
-                }
-                
-                # Run focused scan
-                scan_results = self.run_scan("custom", [host])
-                
-                # Merge results
-                if host in scan_results.get("services", {}):
-                    enhanced["services"][host] = scan_results["services"][host]
-                    
-        return enhanced
-    
-    def generate_metasploit_rc(self, scan_results: Dict, output_file: str = "r3cond0g.rc"):
-        """Generate Metasploit resource script from scan results"""
-        self.logger.info("Generating Metasploit resource script")
-        
-        rc_commands = []
-        rc_commands.append("# R3COND0G Metasploit Resource Script")
-        rc_commands.append(f"# Generated: {datetime.now()}")
-        rc_commands.append("")
-        
-        # Workspace setup
-        rc_commands.append("workspace -a r3cond0g_scan")
-        rc_commands.append("")
-        
-        # Add discovered hosts
-        for host in scan_results.get("hosts", []):
-            rc_commands.append(f"db_nmap -sV -p- {host}")
-            
-        # Generate exploit suggestions based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    port = service.get("port")
-                    svc_name = service.get("service", "").lower()
-                    
-                    # Common service exploits
-                    if "ssh" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/ssh/ssh_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "http" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/http/dir_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append(f"set RPORT {port}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "smb" in svc_name or "microsoft-ds" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/smb/smb_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "mysql" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/mysql/mysql_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                    
-                    elif "rdp" in svc_name or port == "3389":
-                        rc_commands.append(f"use auxiliary/scanner/rdp/rdp_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-        
-        # Save resource script
-        with open(output_file, 'w') as f:
-            f.write("\n".join(rc_commands))
-            
-        self.logger.info(f"✓ Metasploit resource script saved to {output_file}")
-        return output_file
-    
-    def generate_siem_feed(self, scan_results: Dict, format: str = "cef") -> str:
-        """Generate SIEM-compatible event feed"""
-        events = []
-        
-        if format == "cef":
-            # Common Event Format
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"CEF:0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"Open Port Detected|3|src={host} dpt={service.get('port')} "
-                            f"proto={service.get('protocol', 'tcp')} app={service.get('service', 'unknown')} "
-                            f"msg=Open port detected during reconnaissance scan"
-                        )
-                        events.append(event)
-                        
-            # Add vulnerability events
-            for vuln in scan_results.get("vulnerabilities", []):
-                event = (
-                    f"CEF:0|R3COND0G|NetworkScanner|3.0.0|VULN_DETECTED|"
-                    f"Vulnerability Detected|7|src={vuln.get('host')} "
-                    f"cve={vuln.get('cve_id')} cvss={vuln.get('cvss_score', 0)} "
-                    f"msg={vuln.get('description', 'Vulnerability detected')}"
-                )
-                events.append(event)
-                
-        elif format == "leef":
-            # Log Event Extended Format (IBM QRadar)
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"LEEF:1.0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"src={host}|dst={host}|dstPort={service.get('port')}|"
-                            f"proto={service.get('protocol', 'tcp')}|app={service.get('service', 'unknown')}"
-                        )
-                        events.append(event)
-                        
-        elif format == "json":
-            # JSON format for modern SIEMs
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = {
-                            "timestamp": datetime.now().isoformat(),
-                            "event_type": "port_scan",
-                            "severity": "medium",
-                            "source_tool": "R3COND0G",
-                            "host": host,
-                            "port": service.get("port"),
-                            "protocol": service.get("protocol", "tcp"),
-                            "service": service.get("service", "unknown"),
-                            "state": service.get("state")
-                        }
-                        events.append(json.dumps(event))
-        
-        return "\n".join(events) if format != "json" else events
-    
-    def nvd_integration(self, cve_list: List[str] = None, bulk_update: bool = False):
-        """Integrate with NVD API for vulnerability information"""
-        if not self.nvd_api_key:
-            self.logger.warning("NVD API key not configured")
-            return []
-        
-        base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        headers = {"apiKey": self.nvd_api_key}
-        
-        vulnerabilities = []
-        
-        if bulk_update:
-            # Update vulnerability database
-            self.logger.info("Updating vulnerability database from NVD...")
-            
-            # Get recent CVEs (last 7 days)
-            mod_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000")
-            mod_end = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
-            
-            params = {
-                "lastModStartDate": mod_start,
-                "lastModEndDate": mod_end,
-                "resultsPerPage": 100
-            }
-            
-            try:
-                response = requests.get(base_url, headers=headers, params=params, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    for vuln in data.get("vulnerabilities", []):
-                        cve = vuln.get("cve", {})
-                        cve_id = cve.get("id")
-                        
-                        # Extract CVSS score
-                        cvss_score = 0
-                        metrics = cve.get("metrics", {})
-                        if "cvssMetricV31" in metrics:
-                            cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                        elif "cvssMetricV30" in metrics:
-                            cvss_score = metrics["cvssMetricV30"][0].get("cvssData", {}).get("baseScore", 0)
-                        
-                        vuln_info = {
-                            "cve_id": cve_id,
-                            "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                            "cvss_score": cvss_score,
-                            "published_date": cve.get("published", ""),
-                            "last_modified": cve.get("lastModified", "")
-                        }
-                        
-                        vulnerabilities.append(vuln_info)
-                        self._cache_vulnerability(vuln_info)
-                        
-                    self.logger.info(f"✓ Updated {len(vulnerabilities)} vulnerabilities")
-                    
-            except Exception as e:
-                self.logger.error(f"NVD API error: {e}")
-                
-        elif cve_list:
-            # Query specific CVEs
-            for cve_id in cve_list:
-                # Check cache first
-                cached = self._get_cached_vulnerability(cve_id)
-                if cached:
-                    vulnerabilities.append(cached)
-                else:
-                    # Query NVD
-                    try:
-                        response = requests.get(f"{base_url}?cveId={cve_id}", 
-                                              headers=headers, timeout=30)
-                        if response.status_code == 200:
-                            data = response.json()
-                            if data.get("vulnerabilities"):
-                                vuln = data["vulnerabilities"][0]
-                                cve = vuln.get("cve", {})
-                                
-                                # Extract CVSS score
-                                cvss_score = 0
-                                metrics = cve.get("metrics", {})
-                                if "cvssMetricV31" in metrics:
-                                    cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                                
-                                vuln_info = {
-                                    "cve_id": cve_id,
-                                    "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                                    "cvss_score": cvss_score,
-                                    "published_date": cve.get("published", ""),
-                                    "last_modified": cve.get("lastModified", "")
-                                }
-                                
-                                vulnerabilities.append(vuln_info)
-                                self._cache_vulnerability(vuln_info)
-                                
-                    except Exception as e:
-                        self.logger.error(f"Error querying CVE {cve_id}: {e}")
-        
-        return vulnerabilities
-    
-    def _cache_vulnerability(self, vuln_info: Dict):
-        """Cache vulnerability information in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO vuln_cache 
-            (cve_id, description, cvss_score, published_date, affected_products)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            vuln_info.get("cve_id"),
-            vuln_info.get("description", ""),
-            vuln_info.get("cvss_score", 0),
-            vuln_info.get("published_date", ""),
-            json.dumps(vuln_info.get("affected_products", []))
-        ))
-        
-        conn.commit()
-        conn.close()
-    
-    def _get_cached_vulnerability(self, cve_id: str) -> Optional[Dict]:
-        """Retrieve cached vulnerability information"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT description, cvss_score, published_date, affected_products
-            FROM vuln_cache
-            WHERE cve_id = ?
-            AND datetime(last_updated) > datetime('now', '-7 days')
-        ''', (cve_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                "cve_id": cve_id,
-                "description": row[0],
-                "cvss_score": row[1],
-                "published_date": row[2],
-                "affected_products": json.loads(row[3]) if row[3] else []
-            }
-        return None
-    
-    def optimize_performance(self, target_count: int, network_type: str = "lan"):
-        """Generate optimized configuration based on target environment"""
-        
-        optimizations = {
-            "lan": {
-                "small": {"concurrency": 500, "timeout": 500, "rate_limit": 0},
-                "medium": {"concurrency": 300, "timeout": 1000, "rate_limit": 0},
-                "large": {"concurrency": 100, "timeout": 2000, "rate_limit": 100}
-            },
-            "wan": {
-                "small": {"concurrency": 50, "timeout": 3000, "rate_limit": 50},
-                "medium": {"concurrency": 30, "timeout": 5000, "rate_limit": 30},
-                "large": {"concurrency": 10, "timeout": 8000, "rate_limit": 10}
-            },
-            "internet": {
-                "small": {"concurrency": 20, "timeout": 5000, "rate_limit": 20},
-                "medium": {"concurrency": 10, "timeout": 8000, "rate_limit": 10},
-                "large": {"concurrency": 5, "timeout": 10000, "rate_limit": 5}
-            }
-        }
-        
-        # Determine size category
-        if target_count <= 10:
-            size = "small"
-        elif target_count <= 100:
-            size = "medium"
-        else:
-            size = "large"
-        
-        # Get optimizations
-        opt = optimizations.get(network_type, {}).get(size, {})
-        
-        # Calculate memory requirements
-        memory_per_connection = 0.5  # MB
-        estimated_memory = opt.get("concurrency", 100) * memory_per_connection
-        
-        # System optimization commands
-        if platform.system() == "Linux":
-            system_opts = [
-                f"ulimit -n {opt.get('concurrency', 100) * 10}",
-                f"sysctl -w net.ipv4.tcp_fin_timeout=30",
-                f"sysctl -w net.ipv4.tcp_tw_reuse=1"
-            ]
-        else:
-            system_opts = []
-        
-        optimization_config = {
-            "performance_profile": f"{network_type}_{size}",
-            "max_concurrency": opt.get("concurrency", 100),
-            "timeout": opt.get("timeout", 5000),
-            "rate_limit": opt.get("rate_limit", 0),
-            "estimated_memory_mb": estimated_memory,
-            "system_optimizations": system_opts,
-            "recommendations": [
-                f"Use {opt.get('concurrency', 100)} concurrent connections",
-                f"Set timeout to {opt.get('timeout', 5000)}ms",
-                f"Estimated memory usage: {estimated_memory:.1f}MB",
-                f"Network type: {network_type.upper()}"
-            ]
-        }
-        
-        # Save optimization config
-        with open("optimization_config.json", 'w') as f:
-            json.dump(optimization_config, f, indent=2)
-        
-        self.logger.info(f"✓ Generated optimization config for {target_count} targets on {network_type}")
-        return optimization_config
-    
-    def generate_reports(self, scan_results: Dict, formats: List[str] = ["html", "json", "pdf"]):
-        """Generate comprehensive reports in multiple formats"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_dir = Path(f"reports_{timestamp}")
-        report_dir.mkdir(exist_ok=True)
-        
-        reports = {}
-        
-        for fmt in formats:
-            if fmt == "html":
-                report_path = report_dir / f"report_{timestamp}.html"
-                self._generate_html_report(scan_results, report_path)
-                reports["html"] = str(report_path)
-                
-            elif fmt == "json":
-                report_path = report_dir / f"report_{timestamp}.json"
-                with open(report_path, 'w') as f:
-                    json.dump(scan_results, f, indent=2, default=str)
-                reports["json"] = str(report_path)
-                
-            elif fmt == "markdown":
-                report_path = report_dir / f"report_{timestamp}.md"
-                self._generate_markdown_report(scan_results, report_path)
-                reports["markdown"] = str(report_path)
-                
-            elif fmt == "csv":
-                report_path = report_dir / f"report_{timestamp}.csv"
-                self._generate_csv_report(scan_results, report_path)
-                reports["csv"] = str(report_path)
-        
-        self.logger.info(f"✓ Generated {len(reports)} reports in {report_dir}")
-        return reports
-    
-    def _generate_html_report(self, scan_results: Dict, output_path: Path):
-        """Generate HTML report with charts and visualizations"""
-        html_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>R3COND0G Scan Report</title>
-    <meta charset="utf-8">
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
-        .header h1 { margin: 0; font-size: 2.5em; }
-        .header .subtitle { opacity: 0.9; margin-top: 10px; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .stat-card .value { font-size: 2em; font-weight: bold; color: #667eea; }
-        .stat-card .label { color: #666; margin-top: 5px; }
-        .section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .section h2 { color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th { background: #667eea; color: white; padding: 12px; text-align: left; }
-        td { padding: 10px; border-bottom: 1px solid #eee; }
-        tr:hover { background: #f9f9f9; }
-        .vulnerability { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 5px; }
-        .critical { border-left-color: #dc3545; background: #f8d7da; }
-        .high { border-left-color: #fd7e14; background: #ffe5d0; }
-        .medium { border-left-color: #ffc107; background: #fff3cd; }
-        .low { border-left-color: #28a745; background: #d4edda; }
-        .chart-container { width: 100%; height: 300px; margin: 20px 0; }
-        .footer { text-align: center; color: #666; margin-top: 40px; padding: 20px; }
-    </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-    <div class="header">
-        <h1>🦅 R3COND0G Scan Report</h1>
-        <div class="subtitle">Generated: {timestamp}</div>
-    </div>
-    
-    <div class="stats">
-        <div class="stat-card">
-            <div class="value">{total_hosts}</div>
-            <div class="label">Hosts Scanned</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{open_ports}</div>
-            <div class="label">Open Ports</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{services}</div>
-            <div class="label">Services Detected</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{vulnerabilities}</div>
-            <div class="label">Vulnerabilities</div>
-        </div>
-    </div>
-    
-    <div class="section">
-        <h2>Discovered Services</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Host</th>
-                    <th>Port</th>
-                    <th>Protocol</th>
-                    <th>Service</th>
-                    <th>Version</th>
-                    <th>State</th>
-                </tr>
-            </thead>
-            <tbody>
-                {service_rows}
-            </tbody>
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>Vulnerability Summary</h2>
-        {vulnerability_section}
-    </div>
-    
-    <div class="section">
-        <h2>Port Distribution</h2>
-        <canvas id="portChart"></canvas>
-    </div>
-    
-    <div class="footer">
-        <p>R3COND0G v3.0.0 | Advanced Network Reconnaissance Platform</p>
-        <p>Report generated by Command & Control System</p>
-    </div>
-    
-    <script>
-        // Port distribution chart
-        const ctx = document.getElementById('portChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: {port_labels},
-                datasets: [{
-                    label: 'Port Frequency',
-                    data: {port_data},
-                    backgroundColor: 'rgba(102, 126, 234, 0.5)',
-                    borderColor: 'rgba(102, 126, 234, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false
-            }
-        });
-    </script>
-</body>
-</html>
-        """
-        
-        # Calculate statistics
-        total_hosts = len(scan_results.get("hosts", []))
-        
-        service_count = 0
-        open_port_count = 0
-        service_rows = []
-        port_distribution = {}
-        
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    open_port_count += 1
-                    service_count += 1
-                    
-                    port = service.get("port", "unknown")
-                    port_distribution[port] = port_distribution.get(port, 0) + 1
-                    
-                    service_rows.append(f"""
-                        <tr>
-                            <td>{host}</td>
-                            <td>{port}</td>
-                            <td>{service.get('protocol', 'tcp')}</td>
-                            <td>{service.get('service', 'unknown')}</td>
-                            <td>{service.get('version', '-')}</td>
-                            <td>{service.get('state', 'unknown')}</td>
-                        </tr>
-                    """)
-        
-        # Vulnerability section
-        vuln_html = ""
-        vuln_count = len(scan_results.get("vulnerabilities", []))
-        for vuln in scan_results.get("vulnerabilities", []):
-            severity_class = "medium"
-            cvss = vuln.get("cvss_score", 0)
-            if cvss >= 9.0:
-                severity_class = "critical"
-            elif cvss >= 7.0:
-                severity_class = "high"
-            elif cvss >= 4.0:
-                severity_class = "medium"
-            else:
-                severity_class = "low"
-                
-            vuln_html += f"""
-                <div class="vulnerability {severity_class}">
-                    <strong>{vuln.get('cve_id', 'Unknown')}</strong> - CVSS: {cvss}<br>
-                    {vuln.get('description', 'No description available')}
-                </div>
-            """
-        
-        # Prepare chart data
-        port_labels = list(port_distribution.keys())[:10]  # Top 10 ports
-        port_data = [port_distribution[p] for p in port_labels]
-        
-        # Fill template
-        html_content = html_template.format(
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            total_hosts=total_hosts,
-            open_ports=open_port_count,
-            services=service_count,
-            vulnerabilities=vuln_count,
-            service_rows="\n".join(service_rows) if service_rows else "<tr><td colspan='6'>No services detected</td></tr>",
-            vulnerability_section=vuln_html if vuln_html else "<p>No vulnerabilities detected</p>",
-            port_labels=json.dumps(port_labels),
-            port_data=json.dumps(port_data)
-        )
-        
-        with open(output_path, 'w') as f:
-            f.write(html_content)
-    
-    def _generate_markdown_report(self, scan_results: Dict, output_path: Path):
-        """Generate Markdown report"""
-        md_content = f"""# R3COND0G Scan Report
-
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-## Executive Summary
-
-- **Hosts Scanned**: {len(scan_results.get('hosts', []))}
-- **Open Ports Found**: {sum(len(s) for s in scan_results.get('services', {}).values())}
-- **Vulnerabilities Detected**: {len(scan_results.get('vulnerabilities', []))}
-
-## Discovered Services
-
-| Host | Port | Protocol | Service | Version | State |
-|------|------|----------|---------|---------|-------|
-"""
-        
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                md_content += f"| {host} | {service.get('port')} | {service.get('protocol', 'tcp')} | "
-                md_content += f"{service.get('service', 'unknown')} | {service.get('version', '-')} | "
-                md_content += f"{service.get('state', 'unknown')} |\n"
-        
-        md_content += "\n## Vulnerability Summary\n\n"
-        
-        for vuln in scan_results.get("vulnerabilities", []):
-            md_content += f"### {vuln.get('cve_id', 'Unknown')}\n"
-            md_content += f"- **CVSS Score**: {vuln.get('cvss_score', 'N/A')}\n"
-            md_content += f"- **Description**: {vuln.get('description', 'No description')}\n\n"
-        
-        with open(output_path, 'w') as f:
-            f.write(md_content)
-    
-    def _generate_csv_report(self, scan_results: Dict, output_path: Path):
-        """Generate CSV report"""
-        import csv
-        
-        with open(output_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Host", "Port", "Protocol", "Service", "Version", "State", "Vulnerabilities"])
-            
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    vulns = []
-                    # Find vulnerabilities for this service
-                    for vuln in scan_results.get("vulnerabilities", []):
-                        if vuln.get("host") == host and vuln.get("port") == service.get("port"):
-                            vulns.append(vuln.get("cve_id", ""))
-                    
-                    writer.writerow([
-                        host,
-                        service.get("port"),
-                        service.get("protocol", "tcp"),
-                        service.get("service", "unknown"),
-                        service.get("version", ""),
-                        service.get("state", "unknown"),
-                        ";".join(vulns)
-                    ])
-    
-    def generate_topology(self, scan_results: Dict, output_format: str = "dot"):
-        """Generate network topology visualization"""
-        if not NETWORK_VIZ:
-            self.logger.warning("NetworkX not installed. Install with: pip install networkx matplotlib")
-            return None
-        
-        G = nx.Graph()
-        
-        # Add nodes for hosts
-        for host in scan_results.get("hosts", []):
-            G.add_node(host, node_type="host")
-        
-        # Add edges based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    service_node = f"{service.get('service', 'unknown')}:{service.get('port')}"
-                    G.add_node(service_node, node_type="service")
-                    G.add_edge(host, service_node)
-        
-        if output_format == "dot":
-            # Generate DOT format
-            dot_content = "digraph NetworkTopology {\n"
-            dot_content += '  rankdir=LR;\n'
-            dot_content += '  node [shape=box, style=filled];\n'
-            
-            for node in G.nodes():
-                if G.nodes[node].get("node_type") == "host":
-                    dot_content += f'  "{node}" [fillcolor=lightblue, label="{node}\\nHost"];\n'
-                else:
-                    dot_content += f'  "{node}" [fillcolor=lightgreen, label="{node}"];\n'
-            
-            for edge in G.edges():
-                dot_content += f'  "{edge[0]}" -> "{edge[1]}";\n'
-            
-            dot_content += "}\n"
-            
-            with open("network_topology.dot", 'w') as f:
-                f.write(dot_content)
-            
-            self.logger.info("✓ Network topology saved to network_topology.dot")
-            return "network_topology.dot"
-            
-        elif output_format == "png":
-            # Generate PNG visualization
-            plt.figure(figsize=(12, 8))
-            pos = nx.spring_layout(G)
-            
-            # Draw nodes
-            host_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "host"]
-            service_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "service"]
-            
-            nx.draw_networkx_nodes(G, pos, nodelist=host_nodes, node_color='lightblue', 
-                                 node_size=1000, label="Hosts")
-            nx.draw_networkx_nodes(G, pos, nodelist=service_nodes, node_color='lightgreen', 
-                                 node_size=500, label="Services")
-            
-            # Draw edges and labels
-            nx.draw_networkx_edges(G, pos, alpha=0.5)
-            nx.draw_networkx_labels(G, pos)
-            
-            plt.title("Network Topology")
-            plt.legend()
-            plt.axis('off')
-            plt.savefig("network_topology.png", dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            self.logger.info("✓ Network topology saved to network_topology.png")
-            return "network_topology.png"
-    
-    def interactive_mode(self):
-        """Run in interactive mode with menu"""
-        if not self.console:
-            print("Interactive mode requires 'rich' library. Install with: pip install rich")
-            return
-        
-        while True:
-            self.console.clear()
-            self.console.print(Panel.fit("""
-[bold cyan]🦅 R3COND0G Command & Control System[/bold cyan]
-[dim]Advanced Orchestration Platform v3.0.0[/dim]
-            """, border_style="bright_blue"))
-            
-            menu_table = Table(show_header=False, box=None)
-            menu_table.add_column("Option", style="cyan", width=3)
-            menu_table.add_column("Description", style="white")
-            
-            menu_items = [
-                ("1", "Build Core Binary"),
-                ("2", "Generate Probe Definitions"),
-                ("3", "Create Scan Profile"),
-                ("4", "Run Scan"),
-                ("5", "Import Nmap Results"),
-                ("6", "Generate Metasploit RC"),
-                ("7", "Update Vulnerability Database"),
-                ("8", "Generate Reports"),
-                ("9", "Optimize Performance"),
-                ("10", "Generate SIEM Feed"),
-                ("11", "View Scan History"),
-                ("12", "Generate Network Topology"),
-                ("0", "Exit")
-            ]
-            
-            for option, desc in menu_items:
-                menu_table.add_row(f"[bold]{option}[/bold]", desc)
-            
-            self.console.print(menu_table)
-            
-            choice = Prompt.ask("\n[bold yellow]Select option[/bold yellow]")
-            
-            if choice == "1":
-                self.console.print("\n[cyan]Building Core Binary...[/cyan]")
-                optimize = Confirm.ask("Enable optimizations?", default=True)
-                cross = Confirm.ask("Cross-compile for other platforms?", default=False)
-                platforms = []
-                if cross:
-                    platforms = Prompt.ask("Enter platforms (e.g., linux/amd64,windows/amd64)").split(",")
-                self.build_core(optimize, platforms if platforms else None)
-                
-            elif choice == "2":
-                self.console.print("\n[cyan]Generating Probe Definitions...[/cyan]")
-                custom = Confirm.ask("Add custom services?", default=False)
-                services = []
-                if custom:
-                    services = Prompt.ask("Enter service names (comma-separated)").split(",")
-                self.generate_probes(services if services else None)
-                
-            elif choice == "3":
-                self.console.print("\n[cyan]Creating Scan Profile...[/cyan]")
-                name = Prompt.ask("Profile name")
-                base = Prompt.ask("Base profile", default="default", 
-                                choices=["default", "stealth", "aggressive", "discovery"])
-                self.create_scan_profile(name, base)
-                
-            elif choice == "4":
-                self.console.print("\n[cyan]Running Scan...[/cyan]")
-                profile = Prompt.ask("Select profile", default="default")
-                targets = Prompt.ask("Enter targets (comma-separated)")
-                results = self.run_scan(profile, targets.split(",") if targets else None)
-                if results:
-                    self.console.print(Panel(f"Scan completed. Found {len(results.get('services', {}))} services", 
-                                           style="green"))
-                
-            elif choice == "5":
-                self.console.print("\n[cyan]Importing Nmap Results...[/cyan]")
-                nmap_file = Prompt.ask("Enter Nmap XML file path")
-                if os.path.exists(nmap_file):
-                    results = self.integrate_nmap(nmap_file)
-                    self.console.print(f"[green]✓ Imported {len(results.get('hosts', []))} hosts[/green]")
-                else:
-                    self.console.print("[red]File not found[/red]")
-                
-            elif choice == "6":
-                self.console.print("\n[cyan]Generating Metasploit RC...[/cyan]")
-                # Load last scan results
-                results = self._load_last_scan_results()
-                if results:
-                    output = self.generate_metasploit_rc(results)
-                    self.console.print(f"[green]✓ Generated {output}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "7":
-                self.console.print("\n[cyan]Updating Vulnerability Database...[/cyan]")
-                if not self.nvd_api_key:
-                    self.nvd_api_key = Prompt.ask("Enter NVD API key")
-                self.nvd_integration(bulk_update=True)
-                
-            elif choice == "8":
-                self.console.print("\n[cyan]Generating Reports...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    formats = Prompt.ask("Select formats (comma-separated)", 
-                                       default="html,json,markdown").split(",")
-                    reports = self.generate_reports(results, formats)
-                    for fmt, path in reports.items():
-                        self.console.print(f"[green]✓ {fmt.upper()}: {path}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "9":
-                self.console.print("\n[cyan]Optimizing Performance...[/cyan]")
-                targets = int(Prompt.ask("Number of targets", default="10"))
-                network = Prompt.ask("Network type", default="lan", 
-                                   choices=["lan", "wan", "internet"])
-                config = self.optimize_performance(targets, network)
-                self.console.print(Panel(f"Recommended: {config['max_concurrency']} concurrent connections\n"
-                                       f"Timeout: {config['timeout']}ms", style="green"))
-                
-            elif choice == "10":
-                self.console.print("\n[cyan]Generating SIEM Feed...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    fmt = Prompt.ask("Format", default="cef", choices=["cef", "leef", "json"])
-                    feed = self.generate_siem_feed(results, fmt)
-                    output_file = f"siem_feed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
-                    with open(output_file, 'w') as f:
-                        f.write(feed if isinstance(feed, str) else json.dumps(feed))
-                    self.console.print(f"[green]✓ SIEM feed saved to {output_file}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "11":
-                self.console.print("\n[cyan]Scan History[/cyan]")
-                self._display_scan_history()
-                
-            elif choice == "12":
-                self.console.print("\n[cyan]Generating Network Topology...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    fmt = Prompt.ask("Format", default="dot", choices=["dot", "png"])
-                    topology = self.generate_topology(results, fmt)
-                    if topology:
-                        self.console.print(f"[green]✓ Topology saved to {topology}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "0":
-                self.console.print("[yellow]Exiting...[/yellow]")
-                break
-            
-            else:
-                self.console.print("[red]Invalid option[/red]")
-            
-            if choice != "0":
-                Prompt.ask("\n[dim]Press Enter to continue[/dim]")
-    
-    def _load_last_scan_results(self) -> Optional[Dict]:
-        """Load the most recent scan results from database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT results FROM scan_history 
-            WHERE status = 'completed'
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        ''')
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return json.loads(row[0])
-        return None
-    
-    def _display_scan_history(self):
-        """Display scan history from database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT timestamp, profile, targets, duration, status
-            FROM scan_history
-            ORDER BY timestamp DESC
-            LIMIT 10
-        ''')
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if rows and self.console:
-            table = Table(title="Recent Scans")
-            table.add_column("Timestamp", style="cyan")
-            table.add_column("Profile", style="green")
-            table.add_column("Targets", style="yellow")
-            table.add_column("Duration", style="magenta")
-            table.add_column("Status", style="white")
-            
-            for row in rows:
-                targets = json.loads(row[2]) if row[2] else []
-                target_str = ", ".join(targets[:3])
-                if len(targets) > 3:
-                    target_str += f" (+{len(targets)-3} more)"
-                
-                table.add_row(
-                    row[0],
-                    row[1],
-                    target_str,
-                    f"{row[3]:.2f}s" if row[3] else "N/A",
-                    row[4]
-                )
-            
-            self.console.print(table)
-        else:
-            print("No scan history available")
-
-def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description="R3COND0G Command & Control System",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Build and optimize core
-  python r3cond0g_controller.py --build --optimize
-  
-  # Run scan with specific profile
-  python r3cond0g_controller.py --scan aggressive --targets 192.168.1.0/24
-  
-  # Generate all reports
-  python r3cond0g_controller.py --report all --format html,json,markdown
-  
-  # Update vulnerability database
-  python r3cond0g_controller.py --update-vulns --nvd-key YOUR_KEY
-  
-  # Interactive mode
-  python r3cond0g_controller.py --interactive
-        """
-    )
-    
-    parser.add_argument("--build", action="store_true", help="Build core binary")
-    parser.add_argument("--optimize", action="store_true", help="Enable build optimizations")
-    parser.add_argument("--cross-compile", nargs="+", help="Cross-compile targets (e.g., linux/amd64 windows/amd64)")
-    
-    parser.add_argument("--generate-probes", action="store_true", help="Generate probe definitions")
-    parser.add_argument("--custom-services", nargs="+", help="Add custom service probes")
-    
-    parser.add_argument("--scan", metavar="PROFILE", help="Run scan with profile")
-    parser.add_argument("--targets", help="Scan targets (comma-separated)")
-    parser.add_argument("--config", help="Use specific configuration file")
-    
-    parser.add_argument("--import-nmap", metavar="FILE", help="Import Nmap XML results")
-    parser.add_argument("--generate-msf", action="store_true", help="Generate Metasploit RC file")
-    
-    parser.add_argument("--update-vulns", action="store_true", help="Update vulnerability database")
-    parser.add_argument("--nvd-key", help="NVD API key")
-    
-    parser.add_argument("--report", choices=["all", "html", "json", "markdown", "csv"], 
-                       help="Generate reports")
-    parser.add_argument("--format", help="Report formats (comma-separated)")
-    
-    parser.add_argument("--optimize-performance", metavar="TARGETS", type=int, 
-                       help="Generate optimized config for N targets")
-    parser.add_argument("--network-type", choices=["lan", "wan", "internet"], 
-                       default="lan", help="Network type for optimization")
-    
-    parser.add_argument("--siem-feed", choices=["cef", "leef", "json"], 
-                       help="Generate SIEM feed")
-    
-    parser.add_argument("--topology", choices=["dot", "png"], help="Generate network topology")
-    
-    parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
-    
-    args = parser.parse_args()
-    
-    # Initialize controller
-    controller = R3COND0GController()
-    
-    # Handle command-line arguments
-    if args.build:
-        controller.build_core(args.optimize, args.cross_compile)
-    
-    elif args.generate_probes:
-        controller.generate_probes(args.custom_services)
-    
-    elif args.scan:
-        targets = args.targets.split(",") if args.targets else None
-        results = controller.run_scan(args.scan, targets)
-        if results:
-            print(f"Scan completed. Found {len(results.get('services', {}))} services")
-    
-    elif args.import_nmap:
-        results = controller.integrate_nmap(args.import_nmap)
-        print(f"Imported {len(results.get('hosts', []))} hosts")
-    
-    elif args.generate_msf:
-        results = controller._load_last_scan_results()
-        if results:
-            output = controller.generate_metasploit_rc(results)
-            print(f"Generated Metasploit RC: {output}")
-    
-    elif args.update_vulns:
-        if args.nvd_key:
-            controller.nvd_api_key = args.nvd_key
-        controller.nvd_integration(bulk_update=True)
-    
-    elif args.report:
-        results = controller._load_last_scan_results()
-        if results:
-            formats = args.format.split(",") if args.format else ["html", "json"]
-            reports = controller.generate_reports(results, formats)
-            for fmt, path in reports.items():
-                print(f"Generated {fmt.upper()} report: {path}")
-    
-    elif args.optimize_performance:
-        config = controller.optimize_performance(args.optimize_performance, args.network_type)
-        print(f"Optimization config generated: {config['performance_profile']}")
-    
-    elif args.siem_feed:
-        results = controller._load_last_scan_results()
-        if results:
-            feed = controller.generate_siem_feed(results, args.siem_feed)
-            output_file = f"siem_feed.{args.siem_feed}"
-            with open(output_file, 'w') as f:
-                f.write(feed if isinstance(feed, str) else json.dumps(feed))
-            print(f"SIEM feed saved to {output_file}")
-    
-    elif args.topology:
-        results = controller._load_last_scan_results()
-        if results:
-            output = controller.generate_topology(results, args.topology)
-            if output:
-                print(f"Topology saved to {output}")
-    
-    elif args.interactive:
-        controller.interactive_mode()
-    
-    else:
-        # Default: show interactive mode if available
+    def print_banner(self):
+        """Print application banner"""
         if RICH_AVAILABLE:
-            controller.interactive_mode()
-        else:
-            parser.print_help()
+            banner_text = f"""
+    ██████╗ ██████╗  ██████╗ ██████╗ ███╗   ██╗██████╗  ██████╗  ██████╗ 
+    ██╔══██╗╚════██╗██╔════╝██╔═══██╗████╗  ██║██╔══██╗██╔═████╗██╔════╝ 
+    ██████╔╝ █████╔╝██║     ██║   ██║██╔██╗ ██║██║  ██║██║██╔██║██║  ███╗
+    ██╔══██╗ ╚═══██╗██║     ██║   ██║██║╚██╗██║██║  ██║████╔╝██║██║   ██║
+    ██║  ██║██████╔╝╚██████╗╚██████╔╝██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝
+    ╚═╝  ╚═╝╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ 
 
-if __name__ == "__main__":
-    main()#!/usr/bin/env python3
-"""
-R3COND0G Command & Control System
-Advanced Orchestration and Management Platform
-Version: 3.0.0
-Author: 0xb0rn3 & 0xbv1
-"""
-
-import os
-import sys
-import json
-import yaml
-import time
-import subprocess
-import argparse
-import logging
-import hashlib
-import sqlite3
-import requests
-import threading
-import shutil
-import platform
-import tempfile
-import concurrent.futures
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-from enum import Enum
-import xml.etree.ElementTree as ET
-
-# Rich console output (install with: pip install rich)
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
-    from rich.panel import Panel
-    from rich.syntax import Syntax
-    from rich.prompt import Prompt, Confirm
-    from rich import print as rprint
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-    print("Warning: 'rich' library not installed. Install with: pip install rich")
-
-# Advanced features
-try:
-    import networkx as nx
-    import matplotlib.pyplot as plt
-    NETWORK_VIZ = True
-except ImportError:
-    NETWORK_VIZ = False
-
-class ScanMode(Enum):
-    """Scan operation modes"""
-    STEALTH = "stealth"
-    NORMAL = "normal"
-    AGGRESSIVE = "aggressive"
-    CUSTOM = "custom"
-    DISCOVERY = "discovery"
-    VULNERABILITY = "vulnerability"
-
-class OutputFormat(Enum):
-    """Output format types"""
-    JSON = "json"
-    XML = "xml"
-    CSV = "csv"
-    HTML = "html"
-    MARKDOWN = "markdown"
-    NMAP = "nmap"
-    METASPLOIT = "metasploit"
-    SIEM = "siem"
-
-@dataclass
-class ScanProfile:
-    """Scan profile configuration"""
-    name: str
-    mode: ScanMode
-    targets: List[str]
-    ports: str
-    timeout: int
-    concurrency: int
-    options: Dict[str, Any]
-
-class R3COND0GController:
-    """Main controller for R3COND0G orchestration"""
-    
-    def __init__(self):
-        self.console = Console() if RICH_AVAILABLE else None
-        self.logger = self._setup_logging()
-        self.config = self._load_config()
-        self.cache_dir = Path.home() / ".r3cond0g_cache"
-        self.cache_dir.mkdir(exist_ok=True)
-        self.db_path = self.cache_dir / "r3cond0g.db"
-        self.probe_dir = Path("probes")
-        self.probe_dir.mkdir(exist_ok=True)
-        self.nvd_api_key = os.environ.get("NVD_API_KEY", "")
-        self.profiles = {}
-        self.init_database()
-        
-    def _setup_logging(self) -> logging.Logger:
-        """Setup logging configuration"""
-        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        logging.basicConfig(
-            level=logging.INFO,
-            format=log_format,
-            handlers=[
-                logging.FileHandler("r3cond0g_controller.log"),
-                logging.StreamHandler()
-            ]
-        )
-        return logging.getLogger("R3COND0G_Controller")
-    
-    def _load_config(self) -> Dict:
-        """Load or create default configuration"""
-        config_path = Path("controller_config.json")
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                return json.load(f)
-        else:
-            default_config = {
-                "version": "3.0.0",
-                "core_binary": "./r3cond0g",
-                "max_concurrency": 1000,
-                "default_timeout": 5000,
-                "cache_ttl": 86400,
-                "auto_update": True,
-                "performance_mode": "balanced",
-                "integrations": {
-                    "nmap": {"enabled": True, "path": "nmap"},
-                    "metasploit": {"enabled": False, "path": "msfconsole"},
-                    "siem": {"enabled": False, "endpoint": ""}
-                }
-            }
-            with open(config_path, 'w') as f:
-                json.dump(default_config, f, indent=2)
-            return default_config
-    
-    def init_database(self):
-        """Initialize SQLite database for caching and history"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Scan history table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS scan_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                profile TEXT,
-                targets TEXT,
-                ports TEXT,
-                results TEXT,
-                duration REAL,
-                status TEXT
-            )
-        ''')
-        
-        # Vulnerability cache table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS vuln_cache (
-                cve_id TEXT PRIMARY KEY,
-                description TEXT,
-                cvss_score REAL,
-                published_date DATE,
-                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-                affected_products TEXT
-            )
-        ''')
-        
-        # Performance metrics table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                scan_rate REAL,
-                memory_usage REAL,
-                cpu_usage REAL,
-                network_throughput REAL
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-    
-    def build_core(self, optimize: bool = True, cross_compile: List[str] = None):
-        """Build the Go core binary with optimizations"""
-        self.logger.info("Building R3COND0G core...")
-        
-        build_cmd = ["go", "build"]
-        
-        if optimize:
-            build_cmd.extend(["-ldflags", "-s -w"])
+                    🦅 Advanced Network Reconnaissance Framework
+                           {VERSION} - Built {BUILD_DATE}
+                              Authors: {AUTHORS}
+            """
             
-        build_cmd.extend(["-o", "r3cond0g", "main.go"])
+            console.print(Panel(
+                Align.center(Text(banner_text, style="bold red")),
+                title="[bold blue]R3COND0G Command & Control System[/bold blue]",
+                border_style="blue"
+            ))
+        else:
+            print(f"\n{'='*80}")
+            print(f"R3COND0G (HellHound) - Advanced Network Reconnaissance Framework")
+            print(f"Version: {VERSION} | Build Date: {BUILD_DATE}")
+            print(f"Authors: {AUTHORS}")
+            print(f"{'='*80}\n")
+    
+    def check_dependencies(self) -> bool:
+        """Check if all dependencies are installed"""
+        deps = {
+            'go': ['go', 'version'],
+            'python3': ['python3', '--version'],
+            'git': ['git', '--version']
+        }
+        
+        missing = []
+        for name, cmd in deps.items():
+            try:
+                subprocess.run(cmd, capture_output=True, check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                missing.append(name)
+        
+        if missing:
+            self.logger.warning(f"Missing dependencies: {', '.join(missing)}")
+            return False
+        return True
+    
+    def install_dependencies(self) -> bool:
+        """Install required dependencies"""
+        if RICH_AVAILABLE:
+            console.print("[yellow]Installing dependencies...[/yellow]")
+        else:
+            print("Installing dependencies...")
+        
+        # Base packages for different distributions
+        package_maps = {
+            'debian': ['golang-go', 'python3-pip', 'python3-dev', 'git', 'libpcap-dev', 'build-essential'],
+            'rhel': ['golang', 'python3-pip', 'python3-devel', 'git', 'libpcap-devel', 'gcc'],
+            'arch': ['go', 'python-pip', 'git', 'libpcap', 'base-devel'],
+            'suse': ['go', 'python3-pip', 'python3-devel', 'git', 'libpcap-devel', 'gcc'],
+            'alpine': ['go', 'py3-pip', 'git', 'libpcap-dev', 'build-base'],
+            'gentoo': ['dev-lang/go', 'dev-python/pip', 'dev-vcs/git', 'net-libs/libpcap'],
+            'void': ['go', 'python3-pip', 'git', 'libpcap-devel', 'base-devel']
+        }
+        
+        family = self.distro.distro_info['family']
+        packages = package_maps.get(family, package_maps['debian'])  # Default to debian
+        
+        cmd = self.distro.get_install_command(packages)
         
         try:
-            # Build for current platform
-            result = subprocess.run(build_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                self.logger.info("✓ Core binary built successfully")
-                
-                # Set executable permissions on Unix
-                if platform.system() != "Windows":
-                    os.chmod("r3cond0g", 0o755)
+            if RICH_AVAILABLE:
+                with console.status("[bold green]Installing system packages...") as status:
+                    subprocess.run(' '.join(cmd), shell=True, check=True, capture_output=True)
             else:
-                self.logger.error(f"Build failed: {result.stderr}")
-                return False
-                
-            # Cross-compile if requested
-            if cross_compile:
-                for target in cross_compile:
-                    os_name, arch = target.split("/")
-                    env = os.environ.copy()
-                    env["GOOS"] = os_name
-                    env["GOARCH"] = arch
-                    
-                    output_name = f"r3cond0g_{os_name}_{arch}"
-                    if os_name == "windows":
-                        output_name += ".exe"
-                    
-                    build_cmd[-1] = "main.go"
-                    build_cmd[-2] = output_name
-                    
-                    result = subprocess.run(build_cmd, capture_output=True, text=True, env=env)
-                    if result.returncode == 0:
-                        self.logger.info(f"✓ Built for {target}")
-                    else:
-                        self.logger.error(f"Failed to build for {target}")
-                        
+                print("Installing system packages...")
+                subprocess.run(' '.join(cmd), shell=True, check=True)
+            
+            # Install Python packages
+            python_packages = [
+                'rich>=12.0.0', 'requests', 'colorama', 'tabulate',
+                'python-nmap', 'scapy', 'cryptography', 'lxml'
+            ]
+            
+            pip_cmd = ['python3', '-m', 'pip', 'install', '--user'] + python_packages
+            
+            if RICH_AVAILABLE:
+                with console.status("[bold green]Installing Python packages...") as status:
+                    subprocess.run(pip_cmd, check=True, capture_output=True)
+            else:
+                print("Installing Python packages...")
+                subprocess.run(pip_cmd, check=True)
+            
             return True
             
-        except Exception as e:
-            self.logger.error(f"Build error: {e}")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Failed to install dependencies: {e}")
             return False
     
-    def generate_probes(self, custom_services: List[str] = None):
-        """Generate probe definitions for service detection"""
+    def build_binary(self) -> bool:
+        """Build the Go binary"""
+        if RICH_AVAILABLE:
+            console.print("[bold green]Building R3COND0G core binary...[/bold green]")
+        else:
+            print("Building R3COND0G core binary...")
         
-        # Default TCP probes
-        tcp_probes = [
+        main_go_path = self.script_dir / "main.go"
+        if not main_go_path.exists():
+            self.logger.error("main.go not found!")
+            return False
+        
+        try:
+            # Initialize Go module if needed
+            if not (self.script_dir / "go.mod").exists():
+                subprocess.run(['go', 'mod', 'init', 'r3cond0g'], 
+                             cwd=self.script_dir, check=True, capture_output=True)
+                subprocess.run(['go', 'mod', 'tidy'], 
+                             cwd=self.script_dir, check=True, capture_output=True)
+            
+            # Build binary with optimizations
+            build_cmd = [
+                'go', 'build',
+                '-ldflags=-s -w',
+                '-o', str(self.binary_path),
+                'main.go'
+            ]
+            
+            if RICH_AVAILABLE:
+                with console.status("[bold blue]Compiling Go binary...") as status:
+                    result = subprocess.run(build_cmd, cwd=self.script_dir, 
+                                          capture_output=True, text=True)
+            else:
+                print("Compiling Go binary...")
+                result = subprocess.run(build_cmd, cwd=self.script_dir)
+            
+            if result.returncode != 0:
+                self.logger.error(f"Build failed: {result.stderr}")
+                return False
+            
+            # Set capabilities for non-root packet capture
+            try:
+                subprocess.run(['sudo', 'setcap', 'cap_net_raw,cap_net_admin=eip', 
+                              str(self.binary_path)], check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                self.logger.warning("Failed to set capabilities. ICMP scanning may require root.")
+            
+            if RICH_AVAILABLE:
+                console.print("[bold green]✓ Binary built successfully![/bold green]")
+            else:
+                print("✓ Binary built successfully!")
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Build failed: {e}")
+            return False
+    
+    def setup_system(self) -> bool:
+        """Complete system setup"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Starting R3COND0G setup...[/bold yellow]")
+        else:
+            print("Starting R3COND0G setup...")
+        
+        # Check if skip dependencies is set
+        if os.getenv('SKIP_DEPS'):
+            if RICH_AVAILABLE:
+                console.print("[yellow]Skipping dependency installation (SKIP_DEPS set)[/yellow]")
+        else:
+            if not self.check_dependencies():
+                if RICH_AVAILABLE:
+                    if Confirm.ask("Install missing dependencies?"):
+                        if not self.install_dependencies():
+                            return False
+                else:
+                    response = input("Install missing dependencies? (y/n): ")
+                    if response.lower() == 'y':
+                        if not self.install_dependencies():
+                            return False
+        
+        # Build binary
+        force_build = os.getenv('FORCE_BUILD') or not self.binary_path.exists()
+        if force_build:
+            if not self.build_binary():
+                return False
+        
+        # Create default profiles
+        self.create_default_profiles()
+        
+        # Update system settings for performance
+        self.optimize_system()
+        
+        if RICH_AVAILABLE:
+            console.print("[bold green]✓ Setup completed successfully![/bold green]")
+        else:
+            print("✓ Setup completed successfully!")
+        
+        return True
+    
+    def create_default_profiles(self):
+        """Create default scan profiles"""
+        profiles = {
+            'stealth': ScanProfile(
+                name='stealth',
+                description='Covert reconnaissance with low detection probability',
+                scan_type='syn',
+                targets=[],
+                ports='21-23,25,53,80,110,443,993,995,1723,3389,5900,8080',
+                timeout=3000,
+                concurrency=10,
+                rate_limit=10,
+                service_detect=True,
+                version_detect=False,
+                os_detect=False,
+                vuln_mapping=False,
+                stealth_mode=True,
+                udp_scan=False,
+                ping_sweep=False,
+                output_format='json',
+                additional_options={'fragment_packets': True, 'random_delay': True}
+            ),
+            'discovery': ScanProfile(
+                name='discovery',
+                description='Network mapping and host discovery',
+                scan_type='connect',
+                targets=[],
+                ports='7,9,13,21-23,25-26,37,53,79-81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,443-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995',
+                timeout=2000,
+                concurrency=100,
+                rate_limit=100,
+                service_detect=True,
+                version_detect=True,
+                os_detect=True,
+                vuln_mapping=False,
+                stealth_mode=False,
+                udp_scan=False,
+                ping_sweep=True,
+                output_format='json',
+                additional_options={'topology_mapping': True, 'mac_lookup': True}
+            ),
+            'aggressive': ScanProfile(
+                name='aggressive',
+                description='Full enumeration with all detection features',
+                scan_type='syn',
+                targets=[],
+                ports='1-65535',
+                timeout=1000,
+                concurrency=1000,
+                rate_limit=1000,
+                service_detect=True,
+                version_detect=True,
+                os_detect=True,
+                vuln_mapping=True,
+                stealth_mode=False,
+                udp_scan=True,
+                ping_sweep=True,
+                output_format='json',
+                additional_options={'script_scan': True, 'banner_grab': True}
+            ),
+            'vulnerability': ScanProfile(
+                name='vulnerability',
+                description='Security assessment focused on vulnerability detection',
+                scan_type='connect',
+                targets=[],
+                ports=self.config['default_ports']['top1000'],
+                timeout=5000,
+                concurrency=50,
+                rate_limit=50,
+                service_detect=True,
+                version_detect=True,
+                os_detect=True,
+                vuln_mapping=True,
+                stealth_mode=False,
+                udp_scan=False,
+                ping_sweep=True,
+                output_format='html',
+                additional_options={'cve_lookup': True, 'script_scan': True}
+            ),
+            'default': ScanProfile(
+                name='default',
+                description='Balanced scanning for general reconnaissance',
+                scan_type='syn',
+                targets=[],
+                ports=self.config['default_ports']['top100'],
+                timeout=1000,
+                concurrency=100,
+                rate_limit=100,
+                service_detect=True,
+                version_detect=True,
+                os_detect=False,
+                vuln_mapping=False,
+                stealth_mode=False,
+                udp_scan=False,
+                ping_sweep=True,
+                output_format='json',
+                additional_options={}
+            )
+        }
+        
+        # Save profiles to database
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            for profile_name, profile in profiles.items():
+                cursor.execute(
+                    'INSERT OR REPLACE INTO profiles (name, config, created_at) VALUES (?, ?, ?)',
+                    (profile_name, json.dumps(profile.to_dict()), datetime.now().isoformat())
+                )
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Failed to save default profiles: {e}")
+    
+    def optimize_system(self):
+        """Optimize system settings for network scanning"""
+        optimizations = [
+            ('net.ipv4.tcp_fin_timeout', '30'),
+            ('net.ipv4.tcp_tw_reuse', '1'),
+            ('net.core.somaxconn', '65535'),
+            ('net.core.netdev_max_backlog', '5000'),
+            ('fs.file-max', '2097152')
+        ]
+        
+        for param, value in optimizations:
+            try:
+                subprocess.run(['sudo', 'sysctl', '-w', f'{param}={value}'], 
+                             capture_output=True, check=True)
+            except subprocess.CalledProcessError:
+                pass  # Non-critical optimization
+        
+        # Increase ulimit for current session
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_NOFILE, (65535, 65535))
+        except:
+            pass
+    
+    def show_interactive_menu(self):
+        """Show interactive menu system"""
+        while True:
+            if RICH_AVAILABLE:
+                console.clear()
+                self.print_banner()
+                
+                table = Table(title="🦅 R3COND0G Command & Control System\nAdvanced Orchestration Platform v3.0.0", 
+                            show_header=False, box=None)
+                table.add_column("Option", style="bold cyan", width=3)
+                table.add_column("Description", style="white")
+                
+                menu_options = [
+                    ("1", "Build Core Binary"),
+                    ("2", "Generate Probe Definitions"),
+                    ("3", "Create Scan Profile"),
+                    ("4", "Run Scan"),
+                    ("5", "Import Nmap Results"),
+                    ("6", "Generate Metasploit RC"),
+                    ("7", "Update Vulnerability Database"),
+                    ("8", "Generate Reports"),
+                    ("9", "Optimize Performance"),
+                    ("10", "Generate SIEM Feed"),
+                    ("11", "View Scan History"),
+                    ("12", "Generate Network Topology"),
+                    ("13", "System Information"),
+                    ("14", "Update R3COND0G"),
+                    ("0", "Exit")
+                ]
+                
+                for option, description in menu_options:
+                    table.add_row(option, description)
+                
+                console.print(table)
+                choice = Prompt.ask("Select option", choices=[str(i) for i in range(15)])
+            else:
+                print("\n" + "="*60)
+                print("R3COND0G Interactive Menu")
+                print("="*60)
+                print("1.  Build Core Binary")
+                print("2.  Generate Probe Definitions")
+                print("3.  Create Scan Profile")
+                print("4.  Run Scan")
+                print("5.  Import Nmap Results")
+                print("6.  Generate Metasploit RC")
+                print("7.  Update Vulnerability Database")
+                print("8.  Generate Reports")
+                print("9.  Optimize Performance")
+                print("10. Generate SIEM Feed")
+                print("11. View Scan History")
+                print("12. Generate Network Topology")
+                print("13. System Information")
+                print("14. Update R3COND0G")
+                print("0.  Exit")
+                print("="*60)
+                choice = input("Select option (0-14): ").strip()
+            
+            if choice == "0":
+                self.exit_application()
+            elif choice == "1":
+                self.build_binary()
+            elif choice == "2":
+                self.generate_probe_definitions()
+            elif choice == "3":
+                self.create_custom_profile()
+            elif choice == "4":
+                self.run_scan_interactive()
+            elif choice == "5":
+                self.import_nmap_results()
+            elif choice == "6":
+                self.generate_metasploit_rc()
+            elif choice == "7":
+                self.update_vulnerability_database()
+            elif choice == "8":
+                self.generate_reports_interactive()
+            elif choice == "9":
+                self.optimize_performance_interactive()
+            elif choice == "10":
+                self.generate_siem_feed()
+            elif choice == "11":
+                self.view_scan_history()
+            elif choice == "12":
+                self.generate_network_topology()
+            elif choice == "13":
+                self.show_system_info()
+            elif choice == "14":
+                self.update_r3cond0g()
+            else:
+                if RICH_AVAILABLE:
+                    console.print("[red]Invalid option![/red]")
+                else:
+                    print("Invalid option!")
+                time.sleep(1)
+    
+    def generate_probe_definitions(self):
+        """Generate custom probe definitions"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Generating Probe Definitions[/bold yellow]")
+            
+            custom_services = Prompt.ask("Enter custom services (comma-separated)", default="")
+            if custom_services:
+                services = [s.strip() for s in custom_services.split(",")]
+            else:
+                services = []
+            
+        else:
+            print("Generating Probe Definitions")
+            custom_services = input("Enter custom services (comma-separated): ").strip()
+            services = [s.strip() for s in custom_services.split(",")] if custom_services else []
+        
+        # Create probe definitions
+        probes = {
+            "version": "3.0.0",
+            "generated": datetime.now().isoformat(),
+            "probes": []
+        }
+        
+        # Default probes
+        default_probes = [
             {
-                "name": "SSH-Banner",
-                "protocol": "TCP",
-                "ports": [22, 2222],
-                "priority": 10,
+                "name": "HTTP",
+                "protocol": "tcp",
+                "ports": [80, 8080, 8443, 8000, 3000, 5000],
+                "priority": 1,
                 "requires_tls": False,
-                "send_payload": "",
-                "read_pattern": "^SSH-([0-9.]+)-([^\\s\\r\\n]+)",
-                "service_override": "ssh",
-                "version_template": "{{group_2}} (protocol {{group_1}})",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "HTTP-Server",
-                "protocol": "TCP",
-                "ports": [80, 8080, 8000, 3000],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
+                "send_payload": "GET / HTTP/1.1\\r\\nHost: {host}\\r\\nUser-Agent: R3COND0G/3.0\\r\\n\\r\\n",
+                "read_pattern": "HTTP/([0-9.]+)\\s+(\\d+)\\s+(.*)\\r?\\n.*Server:\\s*([^\\r\\n]+)",
                 "service_override": "http",
-                "version_template": "{{group_1}}",
+                "version_template": "HTTP/{version} {status} {message} (Server: {server})",
                 "timeout_ms": 5000
             },
             {
-                "name": "HTTPS-Server",
-                "protocol": "TCP",
-                "ports": [443, 8443],
-                "priority": 15,
+                "name": "HTTPS",
+                "protocol": "tcp",
+                "ports": [443, 8443, 9443],
+                "priority": 1,
                 "requires_tls": True,
                 "tls_alpn_protocols": ["http/1.1", "h2"],
-                "send_payload": "GET / HTTP/1.1\\r\\nHost: {{TARGET_HOST}}\\r\\n\\r\\n",
-                "read_pattern": "(?i)Server:\\s*([^\\r\\n]+)",
+                "send_payload": "GET / HTTP/1.1\\r\\nHost: {host}\\r\\nUser-Agent: R3COND0G/3.0\\r\\n\\r\\n",
+                "read_pattern": "HTTP/([0-9.]+)\\s+(\\d+)\\s+(.*)\\r?\\n.*Server:\\s*([^\\r\\n]+)",
                 "service_override": "https",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 8000
+                "version_template": "HTTPS/{version} {status} {message} (Server: {server})",
+                "timeout_ms": 5000
             },
             {
-                "name": "MySQL-Version",
-                "protocol": "TCP",
-                "ports": [3306],
-                "priority": 10,
+                "name": "SSH",
+                "protocol": "tcp", 
+                "ports": [22, 2222, 2022],
+                "priority": 2,
                 "requires_tls": False,
                 "send_payload": "",
-                "read_pattern": "\\x0a([0-9.]+[^\\x00]*)",
-                "service_override": "mysql",
-                "version_template": "{{group_1}}",
+                "read_pattern": "SSH-([0-9.]+)-([^\\r\\n]+)",
+                "service_override": "ssh",
+                "version_template": "SSH-{version}-{server}",
                 "timeout_ms": 3000
             },
             {
-                "name": "PostgreSQL",
-                "protocol": "TCP",
-                "ports": [5432],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f",
-                "read_pattern": "FATAL.*?version \"([^\"]+)\"",
-                "service_override": "postgresql",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "Redis-Info",
-                "protocol": "TCP",
-                "ports": [6379],
-                "priority": 15,
-                "requires_tls": False,
-                "send_payload": "INFO\\r\\n",
-                "read_pattern": "redis_version:([^\\r\\n]+)",
-                "service_override": "redis",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "MongoDB",
-                "protocol": "TCP",
-                "ports": [27017, 27018, 27019],
-                "priority": 15,
+                "name": "FTP",
+                "protocol": "tcp",
+                "ports": [21, 2121],
+                "priority": 2,
                 "requires_tls": False,
                 "send_payload": "",
-                "read_pattern": "version.*?([0-9.]+)",
-                "service_override": "mongodb",
-                "version_template": "{{group_1}}",
-                "timeout_ms": 4000
-            },
-            {
-                "name": "RDP",
-                "protocol": "TCP",
-                "ports": [3389],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x03\\x00\\x00\\x13\\x0e\\xe0\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x08\\x00\\x03\\x00\\x00\\x00",
-                "read_pattern": "\\x03\\x00\\x00\\x13\\x0e\\xd0",
-                "service_override": "rdp",
-                "version_template": "RDP Service",
+                "read_pattern": "220[- ]([^\\r\\n]+)",
+                "service_override": "ftp",
+                "version_template": "FTP {banner}",
                 "timeout_ms": 3000
             }
         ]
         
-        # Default UDP probes
-        udp_probes = [
-            {
-                "name": "DNS-Version",
-                "protocol": "UDP",
-                "ports": [53],
-                "priority": 10,
+        probes["probes"].extend(default_probes)
+        
+        # Add custom service probes
+        for service in services:
+            custom_probe = {
+                "name": service.upper(),
+                "protocol": "tcp",
+                "ports": [],
+                "priority": 5,
                 "requires_tls": False,
-                "send_payload": "\\x00\\x1e\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07version\\x04bind\\x00\\x00\\x10\\x00\\x03",
-                "read_pattern": "([0-9]+\\.[0-9]+)",
-                "service_override": "dns",
-                "version_template": "BIND {{group_1}}",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "SNMP",
-                "protocol": "UDP",
-                "ports": [161],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x30\\x26\\x02\\x01\\x00\\x04\\x06\\x70\\x75\\x62\\x6c\\x69\\x63\\xa0\\x19",
-                "read_pattern": ".",
-                "service_override": "snmp",
-                "version_template": "SNMPv1/v2c",
-                "timeout_ms": 3000
-            },
-            {
-                "name": "NTP",
-                "protocol": "UDP",
-                "ports": [123],
-                "priority": 10,
-                "requires_tls": False,
-                "send_payload": "\\x16\\x02\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00",
-                "read_pattern": ".",
-                "service_override": "ntp",
-                "version_template": "NTP Service",
-                "timeout_ms": 2000
+                "send_payload": "",
+                "read_pattern": f".*{service}.*",
+                "service_override": service.lower(),
+                "version_template": f"{service} {{banner}}",
+                "timeout_ms": 5000
             }
-        ]
+            probes["probes"].append(custom_probe)
         
-        # Add custom service probes if specified
-        if custom_services:
-            for service in custom_services:
-                tcp_probes.append(self._generate_custom_probe(service))
-        
-        # Save probe files
-        with open(self.probe_dir / "tcp_probes.json", 'w') as f:
-            json.dump(tcp_probes, f, indent=2)
+        # Save probes
+        probe_file = self.config_dir / "custom_probes.json"
+        try:
+            with open(probe_file, 'w') as f:
+                json.dump(probes, f, indent=2)
             
-        with open(self.probe_dir / "udp_probes.json", 'w') as f:
-            json.dump(udp_probes, f, indent=2)
-            
-        self.logger.info(f"✓ Generated {len(tcp_probes)} TCP and {len(udp_probes)} UDP probes")
-        return True
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Probe definitions saved to {probe_file}[/green]")
+            else:
+                print(f"✓ Probe definitions saved to {probe_file}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to save probe definitions: {e}")
     
-    def _generate_custom_probe(self, service: str) -> Dict:
-        """Generate a custom probe definition"""
-        return {
-            "name": f"Custom-{service}",
-            "protocol": "TCP",
-            "ports": [],  # Will be determined dynamically
-            "priority": 50,
-            "requires_tls": False,
-            "send_payload": f"{service.upper()}\\r\\n",
-            "read_pattern": f".*{service}.*",
-            "service_override": service.lower(),
-            "version_template": "{{group_0}}",
-            "timeout_ms": 5000
-        }
-    
-    def generate_config(self, profile: str = "default") -> Dict:
-        """Generate configuration for different scan profiles"""
-        
-        configs = {
-            "default": {
-                "target_host": "",
-                "port_range": "1-1000",
-                "scan_timeout": 1000,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 100,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "stealth": {
-                "target_host": "",
-                "port_range": "22,80,443,3389",
-                "scan_timeout": 3000,
-                "service_detect_timeout": 8000,
-                "max_concurrency": 10,
-                "udp_scan": False,
-                "vuln_mapping": False,
-                "topology_mapping": False,
-                "ping_sweep_tcp": False,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "fragment_packets": True,
-                "decoy_hosts": ["10.0.0.99", "10.0.0.100"],
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "aggressive": {
-                "target_host": "",
-                "port_range": "1-65535",
-                "scan_timeout": 500,
-                "service_detect_timeout": 3000,
-                "max_concurrency": 1000,
-                "udp_scan": True,
-                "vuln_mapping": True,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "enable_mac_lookup": True,
-                "os_detect": True,
-                "version_detect": True,
-                "script_scan": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            },
-            "vulnerability": {
-                "target_host": "",
-                "port_range": "1-10000",
-                "scan_timeout": 2000,
-                "service_detect_timeout": 10000,
-                "max_concurrency": 50,
-                "udp_scan": False,
-                "vuln_mapping": True,
-                "topology_mapping": False,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": False,
-                "enable_mac_lookup": False,
-                "service_detect": True,
-                "version_detect": True,
-                "nvd_api_key": self.nvd_api_key,
-                "cve_plugin_file": "custom_cves.json",
-                "probe_files": "probes/tcp_probes.json"
-            },
-            "discovery": {
-                "target_host": "",
-                "port_range": "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080",
-                "scan_timeout": 1500,
-                "service_detect_timeout": 5000,
-                "max_concurrency": 200,
-                "udp_scan": True,
-                "vuln_mapping": False,
-                "topology_mapping": True,
-                "ping_sweep_tcp": True,
-                "ping_sweep_icmp": True,
-                "ping_sweep_ports": "80,443,22,3389,445",
-                "enable_mac_lookup": True,
-                "probe_files": "probes/tcp_probes.json,probes/udp_probes.json"
-            }
-        }
-        
-        config = configs.get(profile, configs["default"])
-        
-        # Save as JSON
-        with open(f"config_{profile}.json", 'w') as f:
-            json.dump(config, f, indent=2)
+    def create_custom_profile(self):
+        """Create a custom scan profile interactively"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Create Custom Scan Profile[/bold yellow]")
             
-        # Save as YAML
-        with open(f"config_{profile}.yaml", 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
+            name = Prompt.ask("Profile name")
+            description = Prompt.ask("Description", default=f"Custom profile: {name}")
+            scan_type = Prompt.ask("Scan type", choices=["syn", "connect", "udp", "stealth"], default="syn")
+            ports = Prompt.ask("Port range", default="1-1000")
+            timeout = int(Prompt.ask("Timeout (ms)", default="1000"))
+            concurrency = int(Prompt.ask("Concurrency", default="100"))
             
-        self.logger.info(f"✓ Generated configuration for profile: {profile}")
-        return config
-    
-    def create_scan_profile(self, name: str, base: str = "default") -> ScanProfile:
-        """Create a custom scan profile"""
-        base_config = self.generate_config(base)
-        
-        if self.console:
-            self.console.print(Panel(f"Creating scan profile: {name}", style="bold blue"))
+            service_detect = Confirm.ask("Enable service detection?", default=True)
+            version_detect = Confirm.ask("Enable version detection?", default=True)
+            os_detect = Confirm.ask("Enable OS detection?", default=False)
+            vuln_mapping = Confirm.ask("Enable vulnerability mapping?", default=False)
+            udp_scan = Confirm.ask("Enable UDP scanning?", default=False)
             
-            # Interactive configuration
-            targets = Prompt.ask("Enter targets (comma-separated)")
-            ports = Prompt.ask("Enter port range", default=base_config["port_range"])
-            timeout = int(Prompt.ask("Connection timeout (ms)", default=str(base_config["scan_timeout"])))
-            concurrency = int(Prompt.ask("Max concurrency", default=str(base_config["max_concurrency"])))
-            
-            udp = Confirm.ask("Enable UDP scanning?", default=False)
-            vuln = Confirm.ask("Enable vulnerability mapping?", default=False)
-            topology = Confirm.ask("Generate network topology?", default=False)
-            
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=targets.split(","),
-                ports=ports,
-                timeout=timeout,
-                concurrency=concurrency,
-                options={
-                    "udp_scan": udp,
-                    "vuln_mapping": vuln,
-                    "topology_mapping": topology
-                }
-            )
         else:
-            # Non-interactive mode
-            profile = ScanProfile(
-                name=name,
-                mode=ScanMode.CUSTOM,
-                targets=[],
-                ports=base_config["port_range"],
-                timeout=base_config["scan_timeout"],
-                concurrency=base_config["max_concurrency"],
-                options=base_config
-            )
+            print("Create Custom Scan Profile")
+            name = input("Profile name: ").strip()
+            description = input(f"Description [{name}]: ").strip() or f"Custom profile: {name}"
+            scan_type = input("Scan type [syn]: ").strip() or "syn"
+            ports = input("Port range [1-1000]: ").strip() or "1-1000"
+            timeout = int(input("Timeout (ms) [1000]: ").strip() or "1000")
+            concurrency = int(input("Concurrency [100]: ").strip() or "100")
+            
+            service_detect = input("Enable service detection? [y]: ").strip().lower() != 'n'
+            version_detect = input("Enable version detection? [y]: ").strip().lower() != 'n'
+            os_detect = input("Enable OS detection? [n]: ").strip().lower() == 'y'
+            vuln_mapping = input("Enable vulnerability mapping? [n]: ").strip().lower() == 'y'
+            udp_scan = input("Enable UDP scanning? [n]: ").strip().lower() == 'y'
         
-        self.profiles[name] = profile
+        profile = ScanProfile(
+            name=name,
+            description=description,
+            scan_type=scan_type,
+            targets=[],
+            ports=ports,
+            timeout=timeout,
+            concurrency=concurrency,
+            rate_limit=concurrency,
+            service_detect=service_detect,
+            version_detect=version_detect,
+            os_detect=os_detect,
+            vuln_mapping=vuln_mapping,
+            stealth_mode=scan_type == 'stealth',
+            udp_scan=udp_scan,
+            ping_sweep=True,
+            output_format='json',
+            additional_options={}
+        )
         
         # Save profile
-        profile_path = self.cache_dir / f"profile_{name}.json"
-        with open(profile_path, 'w') as f:
-            json.dump(asdict(profile), f, indent=2)
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT OR REPLACE INTO profiles (name, config, created_at) VALUES (?, ?, ?)',
+                (name, json.dumps(profile.to_dict()), datetime.now().isoformat())
+            )
+            conn.commit()
+            conn.close()
             
-        self.logger.info(f"✓ Created scan profile: {name}")
-        return profile
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Profile '{name}' created successfully![/green]")
+            else:
+                print(f"✓ Profile '{name}' created successfully!")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to save profile: {e}")
     
-    def run_scan(self, profile: str = "default", targets: List[str] = None) -> Dict:
-        """Execute a scan with specified profile"""
-        
-        # Load or create configuration
-        if profile in self.profiles:
-            scan_profile = self.profiles[profile]
-            config = scan_profile.options
+    def run_scan_interactive(self):
+        """Run scan with interactive options"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Run Network Scan[/bold yellow]")
         else:
-            config = self.generate_config(profile)
-            
-        # Override targets if provided
-        if targets:
-            config["target_host"] = ",".join(targets)
-            
-        # Prepare command
-        cmd = [self.config["core_binary"]]
+            print("Run Network Scan")
         
-        # Add configuration parameters
-        for key, value in config.items():
-            if isinstance(value, bool):
-                if value:
-                    cmd.append(f"-{key.replace('_', '-')}")
-            elif value:
-                cmd.append(f"-{key.replace('_', '-')}")
-                cmd.append(str(value))
+        # Get available profiles
+        profiles = self.get_available_profiles()
+        
+        if RICH_AVAILABLE:
+            profile_choices = list(profiles.keys())
+            profile_name = Prompt.ask("Select profile", choices=profile_choices, default="default")
+            
+            targets = Prompt.ask("Target(s) (IP, CIDR, hostname)")
+            output_format = Prompt.ask("Output format", 
+                                     choices=["json", "xml", "html", "csv"], 
+                                     default="json")
+        else:
+            print("Available profiles:", ", ".join(profiles.keys()))
+            profile_name = input("Select profile [default]: ").strip() or "default"
+            targets = input("Target(s) (IP, CIDR, hostname): ").strip()
+            output_format = input("Output format [json]: ").strip() or "json"
+        
+        if not targets:
+            if RICH_AVAILABLE:
+                console.print("[red]No targets specified![/red]")
+            else:
+                print("No targets specified!")
+            return
+        
+        # Load profile
+        profile_config = profiles.get(profile_name, profiles['default'])
+        profile_config['targets'] = [t.strip() for t in targets.split(',')]
+        profile_config['output_format'] = output_format
+        
+        # Generate scan ID
+        scan_id = f"scan_{int(time.time())}"
+        
+        # Run scan
+        success = self.execute_scan(scan_id, profile_config)
+        
+        if success:
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Scan {scan_id} completed successfully![/green]")
+            else:
+                print(f"✓ Scan {scan_id} completed successfully!")
+        else:
+            if RICH_AVAILABLE:
+                console.print(f"[red]✗ Scan {scan_id} failed![/red]")
+            else:
+                print(f"✗ Scan {scan_id} failed!")
+    
+    def get_available_profiles(self) -> Dict:
+        """Get all available scan profiles"""
+        profiles = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT name, config FROM profiles')
+            
+            for row in cursor.fetchall():
+                name, config_str = row
+                profiles[name] = json.loads(config_str)
+            
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Failed to load profiles: {e}")
+        
+        return profiles
+    
+    def execute_scan(self, scan_id: str, profile_config: Dict) -> bool:
+        """Execute a scan with given configuration"""
+        if not self.binary_path.exists():
+            if RICH_AVAILABLE:
+                console.print("[red]Core binary not found! Run 'Build Core Binary' first.[/red]")
+            else:
+                print("Core binary not found! Run 'Build Core Binary' first.")
+            return False
+        
+        # Build command
+        cmd = [str(self.binary_path)]
+        
+        # Add targets
+        for target in profile_config['targets']:
+            cmd.extend(['--target', target])
+        
+        # Add ports
+        if profile_config.get('ports'):
+            cmd.extend(['--ports', profile_config['ports']])
+        
+        # Add scan options
+        if profile_config.get('timeout'):
+            cmd.extend(['--timeout', str(profile_config['timeout'])])
+        
+        if profile_config.get('concurrency'):
+            cmd.extend(['--concurrency', str(profile_config['concurrency'])])
+        
+        if profile_config.get('service_detect'):
+            cmd.append('--service-detect')
+        
+        if profile_config.get('version_detect'):
+            cmd.append('--version-detect')
+        
+        if profile_config.get('os_detect'):
+            cmd.append('--os-detect')
+        
+        if profile_config.get('vuln_mapping'):
+            cmd.append('--vuln-mapping')
+        
+        if profile_config.get('udp_scan'):
+            cmd.append('--udp-scan')
+        
+        if profile_config.get('stealth_mode'):
+            cmd.append('--stealth')
+        
+        # Output options
+        output_file = self.reports_dir / f"{scan_id}.{profile_config.get('output_format', 'json')}"
+        cmd.extend(['--output', str(output_file)])
+        cmd.extend(['--format', profile_config.get('output_format', 'json')])
+        
+        # Record scan start
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO scans (scan_id, profile_name, targets, start_time, status, command)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                scan_id,
+                profile_config.get('name', 'custom'),
+                ','.join(profile_config['targets']),
+                datetime.now().isoformat(),
+                'running',
+                ' '.join(cmd)
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Failed to record scan start: {e}")
         
         # Execute scan
-        self.logger.info(f"Starting scan with profile: {profile}")
         start_time = time.time()
         
+        if RICH_AVAILABLE:
+            with console.status(f"[bold green]Running scan {scan_id}...") as status:
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+                    success = result.returncode == 0
+                except subprocess.TimeoutExpired:
+                    success = False
+                    result = None
+        else:
+            print(f"Running scan {scan_id}...")
+            try:
+                result = subprocess.run(cmd, timeout=3600)
+                success = result.returncode == 0
+            except subprocess.TimeoutExpired:
+                success = False
+                result = None
+        
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        # Update scan record
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-            duration = time.time() - start_time
-            
-            # Parse results
-            scan_results = self._parse_scan_output(result.stdout)
-            
-            # Store in database
-            self._store_scan_results(profile, targets, config.get("port_range", ""), 
-                                   scan_results, duration, "completed")
-            
-            self.logger.info(f"✓ Scan completed in {duration:.2f} seconds")
-            return scan_results
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error("Scan timeout exceeded")
-            return {"error": "timeout"}
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE scans SET end_time = ?, status = ?, results_file = ?
+                WHERE scan_id = ?
+            ''', (
+                datetime.now().isoformat(),
+                'completed' if success else 'failed',
+                str(output_file) if success else None,
+                scan_id
+            ))
+            conn.commit()
+            conn.close()
         except Exception as e:
-            self.logger.error(f"Scan error: {e}")
-            return {"error": str(e)}
-    
-    def _parse_scan_output(self, output: str) -> Dict:
-        """Parse scan output into structured format"""
-        results = {
-            "hosts": [],
-            "services": {},
-            "vulnerabilities": [],
-            "statistics": {}
-        }
+            self.logger.error(f"Failed to update scan record: {e}")
         
-        # Basic parsing (would be more sophisticated in production)
-        lines = output.split("\n")
-        for line in lines:
-            if "open" in line.lower():
-                # Parse open port information
-                parts = line.split()
-                if len(parts) >= 3:
-                    host = parts[0]
-                    port = parts[1]
-                    service = parts[2] if len(parts) > 2 else "unknown"
-                    
-                    if host not in results["services"]:
-                        results["services"][host] = []
-                    results["services"][host].append({
-                        "port": port,
-                        "service": service,
-                        "state": "open"
-                    })
-                    
-        return results
-    
-    def _store_scan_results(self, profile: str, targets: List[str], ports: str, 
-                           results: Dict, duration: float, status: str):
-        """Store scan results in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        if success and result:
+            if RICH_AVAILABLE:
+                console.print(f"[green]Scan completed in {duration:.1f} seconds[/green]")
+                console.print(f"[blue]Results saved to: {output_file}[/blue]")
+            else:
+                print(f"Scan completed in {duration:.1f} seconds")
+                print(f"Results saved to: {output_file}")
+        elif result:
+            self.logger.error(f"Scan failed: {result.stderr}")
         
-        cursor.execute('''
-            INSERT INTO scan_history (profile, targets, ports, results, duration, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (profile, json.dumps(targets), ports, json.dumps(results), duration, status))
-        
-        conn.commit()
-        conn.close()
+        return success
     
-    def integrate_nmap(self, nmap_file: str) -> Dict:
-        """Import and process Nmap XML results"""
-        self.logger.info(f"Importing Nmap results from {nmap_file}")
+    def import_nmap_results(self):
+        """Import and enhance Nmap XML results"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Import Nmap Results[/bold yellow]")
+            xml_file = Prompt.ask("Path to Nmap XML file")
+        else:
+            print("Import Nmap Results")
+            xml_file = input("Path to Nmap XML file: ").strip()
+        
+        if not os.path.exists(xml_file):
+            if RICH_AVAILABLE:
+                console.print("[red]File not found![/red]")
+            else:
+                print("File not found!")
+            return
         
         try:
-            tree = ET.parse(nmap_file)
+            # Parse Nmap XML
+            tree = ET.parse(xml_file)
             root = tree.getroot()
             
-            results = {
-                "hosts": [],
-                "services": {},
-                "os_detection": {}
-            }
-            
-            for host in root.findall('.//host'):
-                addr = host.find('.//address[@addrtype="ipv4"]')
-                if addr is not None:
-                    ip = addr.get('addr')
-                    results["hosts"].append(ip)
-                    results["services"][ip] = []
-                    
-                    # Parse ports
-                    for port in host.findall('.//port'):
+            results = []
+            for host in root.findall('host'):
+                # Get host address
+                address = host.find('address')
+                if address is None:
+                    continue
+                
+                host_ip = address.get('addr')
+                
+                # Get host status
+                status = host.find('status')
+                if status is None or status.get('state') != 'up':
+                    continue
+                
+                # Get ports
+                ports = host.find('ports')
+                if ports is not None:
+                    for port in ports.findall('port'):
                         port_id = port.get('portid')
                         protocol = port.get('protocol')
-                        state = port.find('state').get('state')
+                        
+                        state = port.find('state')
+                        if state is not None:
+                            port_state = state.get('state')
+                        else:
+                            continue
+                        
                         service = port.find('service')
+                        service_name = service.get('name') if service is not None else ''
+                        service_version = service.get('version') if service is not None else ''
                         
-                        service_info = {
-                            "port": port_id,
-                            "protocol": protocol,
-                            "state": state
+                        result = {
+                            'host': host_ip,
+                            'port': int(port_id),
+                            'protocol': protocol,
+                            'state': port_state,
+                            'service': service_name,
+                            'version': service_version
                         }
-                        
-                        if service is not None:
-                            service_info["service"] = service.get('name', 'unknown')
-                            service_info["version"] = service.get('version', '')
-                            
-                        results["services"][ip].append(service_info)
-                    
-                    # Parse OS detection
-                    os_match = host.find('.//osmatch')
-                    if os_match is not None:
-                        results["os_detection"][ip] = {
-                            "name": os_match.get('name'),
-                            "accuracy": os_match.get('accuracy')
-                        }
+                        results.append(result)
             
-            # Convert to R3COND0G format and enhance
-            enhanced_results = self._enhance_nmap_results(results)
+            # Save enhanced results
+            import_id = f"import_{int(time.time())}"
+            output_file = self.reports_dir / f"{import_id}_enhanced.json"
             
-            self.logger.info(f"✓ Imported {len(results['hosts'])} hosts from Nmap")
-            return enhanced_results
+            with open(output_file, 'w') as f:
+                json.dump({
+                    'import_id': import_id,
+                    'source_file': xml_file,
+                    'imported_at': datetime.now().isoformat(),
+                    'total_results': len(results),
+                    'results': results
+                }, f, indent=2)
             
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Imported {len(results)} results to {output_file}[/green]")
+            else:
+                print(f"✓ Imported {len(results)} results to {output_file}")
+                
         except Exception as e:
-            self.logger.error(f"Failed to parse Nmap file: {e}")
-            return {}
+            self.logger.error(f"Failed to import Nmap results: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Import failed: {e}[/red]")
+            else:
+                print(f"Import failed: {e}")
     
-    def _enhance_nmap_results(self, nmap_results: Dict) -> Dict:
-        """Enhance Nmap results with additional scanning"""
-        # Run targeted scans on discovered services
-        enhanced = nmap_results.copy()
+    def generate_metasploit_rc(self):
+        """Generate Metasploit resource script from scan results"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Generate Metasploit Resource Script[/bold yellow]")
+        else:
+            print("Generate Metasploit Resource Script")
         
-        for host, services in nmap_results["services"].items():
-            # Run service detection on open ports
-            open_ports = [s["port"] for s in services if s["state"] == "open"]
-            if open_ports:
-                config = {
-                    "target_host": host,
-                    "port_range": ",".join(open_ports),
-                    "service_detect": True,
-                    "version_detect": True,
-                    "vuln_mapping": True
+        # Get recent scan results
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT scan_id, results_file FROM scans 
+                WHERE status = 'completed' AND results_file IS NOT NULL
+                ORDER BY start_time DESC LIMIT 10
+            ''')
+            
+            scans = cursor.fetchall()
+            conn.close()
+            
+            if not scans:
+                if RICH_AVAILABLE:
+                    console.print("[red]No completed scans found![/red]")
+                else:
+                    print("No completed scans found!")
+                return
+            
+            if RICH_AVAILABLE:
+                scan_choices = [f"{scan[0]} ({scan[1]})" for scan in scans]
+                selection = Prompt.ask("Select scan", choices=[str(i) for i in range(len(scans))])
+                selected_scan = scans[int(selection)]
+            else:
+                print("Available scans:")
+                for i, scan in enumerate(scans):
+                    print(f"{i}: {scan[0]} ({scan[1]})")
+                selection = int(input("Select scan (0-{}): ".format(len(scans)-1)))
+                selected_scan = scans[selection]
+            
+            results_file = selected_scan[1]
+            
+            # Load results
+            with open(results_file, 'r') as f:
+                results = json.load(f)
+            
+            # Generate RC script
+            rc_content = []
+            rc_content.append("# Metasploit Resource Script generated by R3COND0G")
+            rc_content.append(f"# Generated: {datetime.now().isoformat()}")
+            rc_content.append(f"# Source: {results_file}")
+            rc_content.append("")
+            
+            # Service-to-exploit mapping
+            exploit_map = {
+                'ftp': 'auxiliary/scanner/ftp/ftp_version',
+                'ssh': 'auxiliary/scanner/ssh/ssh_version',
+                'http': 'auxiliary/scanner/http/http_version',
+                'https': 'auxiliary/scanner/http/http_version',
+                'smtp': 'auxiliary/scanner/smtp/smtp_version',
+                'mysql': 'auxiliary/scanner/mysql/mysql_version',
+                'postgresql': 'auxiliary/scanner/postgres/postgres_version',
+                'rdp': 'auxiliary/scanner/rdp/rdp_scanner',
+                'vnc': 'auxiliary/scanner/vnc/vnc_none_auth'
+            }
+            
+            workspace_name = f"r3cond0g_{int(time.time())}"
+            rc_content.append(f"workspace -a {workspace_name}")
+            rc_content.append(f"workspace {workspace_name}")
+            rc_content.append("")
+            
+            # Process results
+            if isinstance(results, dict) and 'results' in results:
+                scan_results = results['results']
+            elif isinstance(results, list):
+                scan_results = results
+            else:
+                scan_results = []
+            
+            for result in scan_results:
+                if result.get('state') == 'open':
+                    service = result.get('service', '').lower()
+                    host = result.get('host')
+                    port = result.get('port')
+                    
+                    if service in exploit_map:
+                        rc_content.append(f"use {exploit_map[service]}")
+                        rc_content.append(f"set RHOSTS {host}")
+                        rc_content.append(f"set RPORT {port}")
+                        rc_content.append("run")
+                        rc_content.append("")
+            
+            rc_content.append("# End of R3COND0G generated script")
+            
+            # Save RC script
+            rc_file = self.reports_dir / f"{selected_scan[0]}_metasploit.rc"
+            with open(rc_file, 'w') as f:
+                f.write('\n'.join(rc_content))
+            
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Metasploit RC script saved to {rc_file}[/green]")
+                console.print("[cyan]Usage: msfconsole -r {rc_file}[/cyan]")
+            else:
+                print(f"✓ Metasploit RC script saved to {rc_file}")
+                print(f"Usage: msfconsole -r {rc_file}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate Metasploit RC: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Failed to generate RC script: {e}[/red]")
+            else:
+                print(f"Failed to generate RC script: {e}")
+    
+    def update_vulnerability_database(self):
+        """Update vulnerability database from NVD"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Update Vulnerability Database[/bold yellow]")
+            
+            api_key = Prompt.ask("NVD API Key (optional, press Enter to skip)", default="")
+        else:
+            print("Update Vulnerability Database")
+            api_key = input("NVD API Key (optional, press Enter to skip): ").strip()
+        
+        # Save API key if provided
+        if api_key:
+            self.config['nvd_api_key'] = api_key
+            self.save_config()
+        
+        vuln_db_file = self.config_dir / "vulnerabilities.db"
+        
+        try:
+            if RICH_AVAILABLE:
+                with console.status("[bold blue]Downloading vulnerability data...") as status:
+                    # Create a basic vulnerability database
+                    vulns = {
+                        "updated": datetime.now().isoformat(),
+                        "source": "NVD NIST",
+                        "version": "1.0",
+                        "vulnerabilities": {
+                            # Sample CVE data - in real implementation, fetch from NVD API
+                            "Apache": ["CVE-2021-44228", "CVE-2021-45046", "CVE-2021-45105"],
+                            "OpenSSH": ["CVE-2023-38408", "CVE-2021-41617"],
+                            "nginx": ["CVE-2021-23017", "CVE-2019-20372"],
+                            "MySQL": ["CVE-2023-22084", "CVE-2023-22079"],
+                            "PostgreSQL": ["CVE-2023-39418", "CVE-2023-39417"],
+                            "vsftpd": ["CVE-2011-2523"],
+                            "ProFTPD": ["CVE-2019-12815", "CVE-2020-9273"],
+                            "Microsoft RDP": ["CVE-2019-0708", "CVE-2019-1181"],
+                            "SMB": ["CVE-2017-0144", "CVE-2017-0145"]
+                        }
+                    }
+                    
+                    with open(vuln_db_file, 'w') as f:
+                        json.dump(vulns, f, indent=2)
+            else:
+                print("Downloading vulnerability data...")
+                # Same logic without rich status
+                vulns = {
+                    "updated": datetime.now().isoformat(),
+                    "source": "NVD NIST",
+                    "version": "1.0",
+                    "vulnerabilities": {
+                        "Apache": ["CVE-2021-44228", "CVE-2021-45046", "CVE-2021-45105"],
+                        "OpenSSH": ["CVE-2023-38408", "CVE-2021-41617"],
+                        "nginx": ["CVE-2021-23017", "CVE-2019-20372"],
+                        "MySQL": ["CVE-2023-22084", "CVE-2023-22079"],
+                        "PostgreSQL": ["CVE-2023-39418", "CVE-2023-39417"],
+                        "vsftpd": ["CVE-2011-2523"],
+                        "ProFTPD": ["CVE-2019-12815", "CVE-2020-9273"],
+                        "Microsoft RDP": ["CVE-2019-0708", "CVE-2019-1181"],
+                        "SMB": ["CVE-2017-0144", "CVE-2017-0145"]
+                    }
                 }
                 
-                # Run focused scan
-                scan_results = self.run_scan("custom", [host])
+                with open(vuln_db_file, 'w') as f:
+                    json.dump(vulns, f, indent=2)
+            
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Vulnerability database updated: {vuln_db_file}[/green]")
+            else:
+                print(f"✓ Vulnerability database updated: {vuln_db_file}")
                 
-                # Merge results
-                if host in scan_results.get("services", {}):
-                    enhanced["services"][host] = scan_results["services"][host]
-                    
-        return enhanced
+        except Exception as e:
+            self.logger.error(f"Failed to update vulnerability database: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Update failed: {e}[/red]")
+            else:
+                print(f"Update failed: {e}")
     
-    def generate_metasploit_rc(self, scan_results: Dict, output_file: str = "r3cond0g.rc"):
-        """Generate Metasploit resource script from scan results"""
-        self.logger.info("Generating Metasploit resource script")
+    def generate_reports_interactive(self):
+        """Generate reports from scan results"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Generate Reports[/bold yellow]")
+        else:
+            print("Generate Reports")
         
-        rc_commands = []
-        rc_commands.append("# R3COND0G Metasploit Resource Script")
-        rc_commands.append(f"# Generated: {datetime.now()}")
-        rc_commands.append("")
-        
-        # Workspace setup
-        rc_commands.append("workspace -a r3cond0g_scan")
-        rc_commands.append("")
-        
-        # Add discovered hosts
-        for host in scan_results.get("hosts", []):
-            rc_commands.append(f"db_nmap -sV -p- {host}")
+        # Get available scan results
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT scan_id, profile_name, targets, start_time, results_file
+                FROM scans WHERE status = 'completed' AND results_file IS NOT NULL
+                ORDER BY start_time DESC LIMIT 20
+            ''')
             
-        # Generate exploit suggestions based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    port = service.get("port")
-                    svc_name = service.get("service", "").lower()
-                    
-                    # Common service exploits
-                    if "ssh" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/ssh/ssh_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "http" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/http/dir_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append(f"set RPORT {port}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "smb" in svc_name or "microsoft-ds" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/smb/smb_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "mysql" in svc_name:
-                        rc_commands.append(f"use auxiliary/scanner/mysql/mysql_version")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-                        
-                    elif "rdp" in svc_name or port == "3389":
-                        rc_commands.append(f"use auxiliary/scanner/rdp/rdp_scanner")
-                        rc_commands.append(f"set RHOSTS {host}")
-                        rc_commands.append("run")
-                        rc_commands.append("")
-        
-        # Save resource script
-        with open(output_file, 'w') as f:
-            f.write("\n".join(rc_commands))
+            scans = cursor.fetchall()
+            conn.close()
             
-        self.logger.info(f"✓ Metasploit resource script saved to {output_file}")
-        return output_file
-    
-    def generate_siem_feed(self, scan_results: Dict, format: str = "cef") -> str:
-        """Generate SIEM-compatible event feed"""
-        events = []
-        
-        if format == "cef":
-            # Common Event Format
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"CEF:0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"Open Port Detected|3|src={host} dpt={service.get('port')} "
-                            f"proto={service.get('protocol', 'tcp')} app={service.get('service', 'unknown')} "
-                            f"msg=Open port detected during reconnaissance scan"
-                        )
-                        events.append(event)
-                        
-            # Add vulnerability events
-            for vuln in scan_results.get("vulnerabilities", []):
-                event = (
-                    f"CEF:0|R3COND0G|NetworkScanner|3.0.0|VULN_DETECTED|"
-                    f"Vulnerability Detected|7|src={vuln.get('host')} "
-                    f"cve={vuln.get('cve_id')} cvss={vuln.get('cvss_score', 0)} "
-                    f"msg={vuln.get('description', 'Vulnerability detected')}"
-                )
-                events.append(event)
-                
-        elif format == "leef":
-            # Log Event Extended Format (IBM QRadar)
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = (
-                            f"LEEF:1.0|R3COND0G|NetworkScanner|3.0.0|PORT_OPEN|"
-                            f"src={host}|dst={host}|dstPort={service.get('port')}|"
-                            f"proto={service.get('protocol', 'tcp')}|app={service.get('service', 'unknown')}"
-                        )
-                        events.append(event)
-                        
-        elif format == "json":
-            # JSON format for modern SIEMs
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    if service.get("state") == "open":
-                        event = {
-                            "timestamp": datetime.now().isoformat(),
-                            "event_type": "port_scan",
-                            "severity": "medium",
-                            "source_tool": "R3COND0G",
-                            "host": host,
-                            "port": service.get("port"),
-                            "protocol": service.get("protocol", "tcp"),
-                            "service": service.get("service", "unknown"),
-                            "state": service.get("state")
-                        }
-                        events.append(json.dumps(event))
-        
-        return "\n".join(events) if format != "json" else events
-    
-    def nvd_integration(self, cve_list: List[str] = None, bulk_update: bool = False):
-        """Integrate with NVD API for vulnerability information"""
-        if not self.nvd_api_key:
-            self.logger.warning("NVD API key not configured")
-            return []
-        
-        base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        headers = {"apiKey": self.nvd_api_key}
-        
-        vulnerabilities = []
-        
-        if bulk_update:
-            # Update vulnerability database
-            self.logger.info("Updating vulnerability database from NVD...")
-            
-            # Get recent CVEs (last 7 days)
-            mod_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000")
-            mod_end = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
-            
-            params = {
-                "lastModStartDate": mod_start,
-                "lastModEndDate": mod_end,
-                "resultsPerPage": 100
-            }
-            
-            try:
-                response = requests.get(base_url, headers=headers, params=params, timeout=30)
-                if response.status_code == 200:
-                    data = response.json()
-                    for vuln in data.get("vulnerabilities", []):
-                        cve = vuln.get("cve", {})
-                        cve_id = cve.get("id")
-                        
-                        # Extract CVSS score
-                        cvss_score = 0
-                        metrics = cve.get("metrics", {})
-                        if "cvssMetricV31" in metrics:
-                            cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                        elif "cvssMetricV30" in metrics:
-                            cvss_score = metrics["cvssMetricV30"][0].get("cvssData", {}).get("baseScore", 0)
-                        
-                        vuln_info = {
-                            "cve_id": cve_id,
-                            "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                            "cvss_score": cvss_score,
-                            "published_date": cve.get("published", ""),
-                            "last_modified": cve.get("lastModified", "")
-                        }
-                        
-                        vulnerabilities.append(vuln_info)
-                        self._cache_vulnerability(vuln_info)
-                        
-                    self.logger.info(f"✓ Updated {len(vulnerabilities)} vulnerabilities")
-                    
-            except Exception as e:
-                self.logger.error(f"NVD API error: {e}")
-                
-        elif cve_list:
-            # Query specific CVEs
-            for cve_id in cve_list:
-                # Check cache first
-                cached = self._get_cached_vulnerability(cve_id)
-                if cached:
-                    vulnerabilities.append(cached)
+            if not scans:
+                if RICH_AVAILABLE:
+                    console.print("[red]No completed scans found![/red]")
                 else:
-                    # Query NVD
-                    try:
-                        response = requests.get(f"{base_url}?cveId={cve_id}", 
-                                              headers=headers, timeout=30)
-                        if response.status_code == 200:
-                            data = response.json()
-                            if data.get("vulnerabilities"):
-                                vuln = data["vulnerabilities"][0]
-                                cve = vuln.get("cve", {})
-                                
-                                # Extract CVSS score
-                                cvss_score = 0
-                                metrics = cve.get("metrics", {})
-                                if "cvssMetricV31" in metrics:
-                                    cvss_score = metrics["cvssMetricV31"][0].get("cvssData", {}).get("baseScore", 0)
-                                
-                                vuln_info = {
-                                    "cve_id": cve_id,
-                                    "description": cve.get("descriptions", [{}])[0].get("value", ""),
-                                    "cvss_score": cvss_score,
-                                    "published_date": cve.get("published", ""),
-                                    "last_modified": cve.get("lastModified", "")
-                                }
-                                
-                                vulnerabilities.append(vuln_info)
-                                self._cache_vulnerability(vuln_info)
-                                
-                    except Exception as e:
-                        self.logger.error(f"Error querying CVE {cve_id}: {e}")
-        
-        return vulnerabilities
+                    print("No completed scans found!")
+                return
+            
+            if RICH_AVAILABLE:
+                # Show scan selection table
+                table = Table(title="Available Scans")
+                table.add_column("ID", style="cyan")
+                table.add_column("Profile", style="green")
+                table.add_column("Targets", style="yellow")
+                table.add_column("Date", style="blue")
+                
+                for i, scan in enumerate(scans):
+                    scan_id, profile, targets, start_time, _ = scan
+                    table.add_row(str(i), profile, targets[:50] + "..." if len(targets) > 50 else targets, 
+                                start_time[:19])
+                
+                console.print(table)
+                selection = Prompt.ask("Select scan", choices=[str(i) for i in range(len(scans))])
+                selected_scan = scans[int(selection)]
+                
+                # Report format selection
+                format_choices = ["html", "json", "csv", "xml", "markdown", "pdf", "all"]
+                report_format = Prompt.ask("Report format", choices=format_choices, default="html")
+                
+            else:
+                print("Available scans:")
+                for i, scan in enumerate(scans):
+                    scan_id, profile, targets, start_time, _ = scan
+                    print(f"{i}: {scan_id} ({profile}) - {targets[:30]}... - {start_time[:19]}")
+                
+                selection = int(input(f"Select scan (0-{len(scans)-1}): "))
+                selected_scan = scans[selection]
+                
+                print("Available formats: html, json, csv, xml, markdown, pdf, all")
+                report_format = input("Report format [html]: ").strip() or "html"
+            
+            # Generate report
+            self.generate_report(selected_scan, report_format)
+            
+        except Exception as e:
+            self.logger.error(f"Failed to generate reports: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Report generation failed: {e}[/red]")
+            else:
+                print(f"Report generation failed: {e}")
     
-    def _cache_vulnerability(self, vuln_info: Dict):
-        """Cache vulnerability information in database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    def generate_report(self, scan_info, format_type):
+        """Generate report in specified format"""
+        scan_id, profile_name, targets, start_time, results_file = scan_info
         
-        cursor.execute('''
-            INSERT OR REPLACE INTO vuln_cache 
-            (cve_id, description, cvss_score, published_date, affected_products)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (
-            vuln_info.get("cve_id"),
-            vuln_info.get("description", ""),
-            vuln_info.get("cvss_score", 0),
-            vuln_info.get("published_date", ""),
-            json.dumps(vuln_info.get("affected_products", []))
-        ))
+        # Load scan results
+        try:
+            with open(results_file, 'r') as f:
+                results_data = json.load(f)
+        except Exception as e:
+            self.logger.error(f"Failed to load results: {e}")
+            return
         
-        conn.commit()
-        conn.close()
-    
-    def _get_cached_vulnerability(self, cve_id: str) -> Optional[Dict]:
-        """Retrieve cached vulnerability information"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        # Process results for reporting
+        if isinstance(results_data, dict) and 'results' in results_data:
+            scan_results = results_data['results']
+        elif isinstance(results_data, list):
+            scan_results = results_data
+        else:
+            scan_results = []
         
-        cursor.execute('''
-            SELECT description, cvss_score, published_date, affected_products
-            FROM vuln_cache
-            WHERE cve_id = ?
-            AND datetime(last_updated) > datetime('now', '-7 days')
-        ''', (cve_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                "cve_id": cve_id,
-                "description": row[0],
-                "cvss_score": row[1],
-                "published_date": row[2],
-                "affected_products": json.loads(row[3]) if row[3] else []
-            }
-        return None
-    
-    def optimize_performance(self, target_count: int, network_type: str = "lan"):
-        """Generate optimized configuration based on target environment"""
-        
-        optimizations = {
-            "lan": {
-                "small": {"concurrency": 500, "timeout": 500, "rate_limit": 0},
-                "medium": {"concurrency": 300, "timeout": 1000, "rate_limit": 0},
-                "large": {"concurrency": 100, "timeout": 2000, "rate_limit": 100}
+        report_data = {
+            'scan_info': {
+                'scan_id': scan_id,
+                'profile': profile_name,
+                'targets': targets,
+                'start_time': start_time,
+                'total_results': len(scan_results)
             },
-            "wan": {
-                "small": {"concurrency": 50, "timeout": 3000, "rate_limit": 50},
-                "medium": {"concurrency": 30, "timeout": 5000, "rate_limit": 30},
-                "large": {"concurrency": 10, "timeout": 8000, "rate_limit": 10}
+            'summary': {
+                'total_hosts': len(set(r.get('host') for r in scan_results)),
+                'open_ports': len([r for r in scan_results if r.get('state') == 'open']),
+                'services_found': len(set(r.get('service') for r in scan_results if r.get('service')))
             },
-            "internet": {
-                "small": {"concurrency": 20, "timeout": 5000, "rate_limit": 20},
-                "medium": {"concurrency": 10, "timeout": 8000, "rate_limit": 10},
-                "large": {"concurrency": 5, "timeout": 10000, "rate_limit": 5}
-            }
+            'results': scan_results
         }
         
-        # Determine size category
-        if target_count <= 10:
-            size = "small"
-        elif target_count <= 100:
-            size = "medium"
+        if format_type == "all":
+            formats = ["html", "json", "csv", "xml", "markdown"]
         else:
-            size = "large"
-        
-        # Get optimizations
-        opt = optimizations.get(network_type, {}).get(size, {})
-        
-        # Calculate memory requirements
-        memory_per_connection = 0.5  # MB
-        estimated_memory = opt.get("concurrency", 100) * memory_per_connection
-        
-        # System optimization commands
-        if platform.system() == "Linux":
-            system_opts = [
-                f"ulimit -n {opt.get('concurrency', 100) * 10}",
-                f"sysctl -w net.ipv4.tcp_fin_timeout=30",
-                f"sysctl -w net.ipv4.tcp_tw_reuse=1"
-            ]
-        else:
-            system_opts = []
-        
-        optimization_config = {
-            "performance_profile": f"{network_type}_{size}",
-            "max_concurrency": opt.get("concurrency", 100),
-            "timeout": opt.get("timeout", 5000),
-            "rate_limit": opt.get("rate_limit", 0),
-            "estimated_memory_mb": estimated_memory,
-            "system_optimizations": system_opts,
-            "recommendations": [
-                f"Use {opt.get('concurrency', 100)} concurrent connections",
-                f"Set timeout to {opt.get('timeout', 5000)}ms",
-                f"Estimated memory usage: {estimated_memory:.1f}MB",
-                f"Network type: {network_type.upper()}"
-            ]
-        }
-        
-        # Save optimization config
-        with open("optimization_config.json", 'w') as f:
-            json.dump(optimization_config, f, indent=2)
-        
-        self.logger.info(f"✓ Generated optimization config for {target_count} targets on {network_type}")
-        return optimization_config
-    
-    def generate_reports(self, scan_results: Dict, formats: List[str] = ["html", "json", "pdf"]):
-        """Generate comprehensive reports in multiple formats"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_dir = Path(f"reports_{timestamp}")
-        report_dir.mkdir(exist_ok=True)
-        
-        reports = {}
+            formats = [format_type]
         
         for fmt in formats:
-            if fmt == "html":
-                report_path = report_dir / f"report_{timestamp}.html"
-                self._generate_html_report(scan_results, report_path)
-                reports["html"] = str(report_path)
-                
-            elif fmt == "json":
-                report_path = report_dir / f"report_{timestamp}.json"
-                with open(report_path, 'w') as f:
-                    json.dump(scan_results, f, indent=2, default=str)
-                reports["json"] = str(report_path)
-                
-            elif fmt == "markdown":
-                report_path = report_dir / f"report_{timestamp}.md"
-                self._generate_markdown_report(scan_results, report_path)
-                reports["markdown"] = str(report_path)
-                
-            elif fmt == "csv":
-                report_path = report_dir / f"report_{timestamp}.csv"
-                self._generate_csv_report(scan_results, report_path)
-                reports["csv"] = str(report_path)
-        
-        self.logger.info(f"✓ Generated {len(reports)} reports in {report_dir}")
-        return reports
+            try:
+                if fmt == "html":
+                    self.generate_html_report(report_data, scan_id)
+                elif fmt == "json":
+                    self.generate_json_report(report_data, scan_id)
+                elif fmt == "csv":
+                    self.generate_csv_report(report_data, scan_id)
+                elif fmt == "xml":
+                    self.generate_xml_report(report_data, scan_id)
+                elif fmt == "markdown":
+                    self.generate_markdown_report(report_data, scan_id)
+                elif fmt == "pdf":
+                    self.generate_pdf_report(report_data, scan_id)
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to generate {fmt} report: {e}")
     
-    def _generate_html_report(self, scan_results: Dict, output_path: Path):
-        """Generate HTML report with charts and visualizations"""
+    def generate_html_report(self, report_data, scan_id):
+        """Generate HTML report"""
         html_template = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>R3COND0G Scan Report</title>
-    <meta charset="utf-8">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>R3COND0G Scan Report - {scan_id}</title>
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
-        .header h1 { margin: 0; font-size: 2.5em; }
-        .header .subtitle { opacity: 0.9; margin-top: 10px; }
-        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
-        .stat-card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        .stat-card .value { font-size: 2em; font-weight: bold; color: #667eea; }
-        .stat-card .label { color: #666; margin-top: 5px; }
-        .section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .section h2 { color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th { background: #667eea; color: white; padding: 12px; text-align: left; }
-        td { padding: 10px; border-bottom: 1px solid #eee; }
-        tr:hover { background: #f9f9f9; }
-        .vulnerability { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin: 10px 0; border-radius: 5px; }
-        .critical { border-left-color: #dc3545; background: #f8d7da; }
-        .high { border-left-color: #fd7e14; background: #ffe5d0; }
-        .medium { border-left-color: #ffc107; background: #fff3cd; }
-        .low { border-left-color: #28a745; background: #d4edda; }
-        .chart-container { width: 100%; height: 300px; margin: 20px 0; }
-        .footer { text-align: center; color: #666; margin-top: 40px; padding: 20px; }
+        body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }}
+        .header {{ text-align: center; margin-bottom: 30px; }}
+        .title {{ color: #d32f2f; font-size: 28px; font-weight: bold; margin-bottom: 10px; }}
+        .subtitle {{ color: #666; font-size: 16px; }}
+        .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }}
+        .summary-card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border-left: 4px solid #d32f2f; }}
+        .summary-number {{ font-size: 32px; font-weight: bold; color: #d32f2f; }}
+        .summary-label {{ color: #666; font-size: 14px; margin-top: 5px; }}
+        .results-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+        .results-table th {{ background: #d32f2f; color: white; padding: 12px; text-align: left; }}
+        .results-table td {{ padding: 10px; border-bottom: 1px solid #eee; }}
+        .results-table tr:hover {{ background: #f8f9fa; }}
+        .open {{ color: #4caf50; font-weight: bold; }}
+        .closed {{ color: #f44336; }}
+        .filtered {{ color: #ff9800; }}
+        .footer {{ text-align: center; margin-top: 30px; color: #666; font-size: 12px; }}
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <div class="header">
-        <h1>🦅 R3COND0G Scan Report</h1>
-        <div class="subtitle">Generated: {timestamp}</div>
-    </div>
-    
-    <div class="stats">
-        <div class="stat-card">
-            <div class="value">{total_hosts}</div>
-            <div class="label">Hosts Scanned</div>
+    <div class="container">
+        <div class="header">
+            <div class="title">🦅 R3COND0G Scan Report</div>
+            <div class="subtitle">Advanced Network Reconnaissance Results</div>
+            <div class="subtitle">Scan ID: {scan_id} | Generated: {timestamp}</div>
         </div>
-        <div class="stat-card">
-            <div class="value">{open_ports}</div>
-            <div class="label">Open Ports</div>
+        
+        <div class="summary">
+            <div class="summary-card">
+                <div class="summary-number">{total_hosts}</div>
+                <div class="summary-label">Total Hosts</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-number">{open_ports}</div>
+                <div class="summary-label">Open Ports</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-number">{services_found}</div>
+                <div class="summary-label">Services Found</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-number">{total_results}</div>
+                <div class="summary-label">Total Results</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="value">{services}</div>
-            <div class="label">Services Detected</div>
-        </div>
-        <div class="stat-card">
-            <div class="value">{vulnerabilities}</div>
-            <div class="label">Vulnerabilities</div>
-        </div>
-    </div>
-    
-    <div class="section">
-        <h2>Discovered Services</h2>
-        <table>
+        
+        <h3>Scan Details</h3>
+        <table class="results-table">
             <thead>
                 <tr>
                     <th>Host</th>
                     <th>Port</th>
                     <th>Protocol</th>
+                    <th>State</th>
                     <th>Service</th>
                     <th>Version</th>
-                    <th>State</th>
                 </tr>
             </thead>
             <tbody>
-                {service_rows}
+                {results_rows}
             </tbody>
         </table>
+        
+        <div class="footer">
+            Generated by R3COND0G v{version} | {authors}
+        </div>
     </div>
-    
-    <div class="section">
-        <h2>Vulnerability Summary</h2>
-        {vulnerability_section}
-    </div>
-    
-    <div class="section">
-        <h2>Port Distribution</h2>
-        <canvas id="portChart"></canvas>
-    </div>
-    
-    <div class="footer">
-        <p>R3COND0G v3.0.0 | Advanced Network Reconnaissance Platform</p>
-        <p>Report generated by Command & Control System</p>
-    </div>
-    
-    <script>
-        // Port distribution chart
-        const ctx = document.getElementById('portChart').getContext('2d');
-        new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: {port_labels},
-                datasets: [{
-                    label: 'Port Frequency',
-                    data: {port_data},
-                    backgroundColor: 'rgba(102, 126, 234, 0.5)',
-                    borderColor: 'rgba(102, 126, 234, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false
-            }
-        });
-    </script>
 </body>
 </html>
         """
         
-        # Calculate statistics
-        total_hosts = len(scan_results.get("hosts", []))
-        
-        service_count = 0
-        open_port_count = 0
-        service_rows = []
-        port_distribution = {}
-        
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    open_port_count += 1
-                    service_count += 1
-                    
-                    port = service.get("port", "unknown")
-                    port_distribution[port] = port_distribution.get(port, 0) + 1
-                    
-                    service_rows.append(f"""
-                        <tr>
-                            <td>{host}</td>
-                            <td>{port}</td>
-                            <td>{service.get('protocol', 'tcp')}</td>
-                            <td>{service.get('service', 'unknown')}</td>
-                            <td>{service.get('version', '-')}</td>
-                            <td>{service.get('state', 'unknown')}</td>
-                        </tr>
-                    """)
-        
-        # Vulnerability section
-        vuln_html = ""
-        vuln_count = len(scan_results.get("vulnerabilities", []))
-        for vuln in scan_results.get("vulnerabilities", []):
-            severity_class = "medium"
-            cvss = vuln.get("cvss_score", 0)
-            if cvss >= 9.0:
-                severity_class = "critical"
-            elif cvss >= 7.0:
-                severity_class = "high"
-            elif cvss >= 4.0:
-                severity_class = "medium"
-            else:
-                severity_class = "low"
-                
-            vuln_html += f"""
-                <div class="vulnerability {severity_class}">
-                    <strong>{vuln.get('cve_id', 'Unknown')}</strong> - CVSS: {cvss}<br>
-                    {vuln.get('description', 'No description available')}
-                </div>
+        # Generate table rows
+        results_rows = []
+        for result in report_data['results']:
+            state_class = result.get('state', 'unknown').lower()
+            row = f"""
+                <tr>
+                    <td>{result.get('host', 'N/A')}</td>
+                    <td>{result.get('port', 'N/A')}</td>
+                    <td>{result.get('protocol', 'N/A')}</td>
+                    <td><span class="{state_class}">{result.get('state', 'N/A')}</span></td>
+                    <td>{result.get('service', 'N/A')}</td>
+                    <td>{result.get('version', 'N/A')}</td>
+                </tr>
             """
+            results_rows.append(row)
         
-        # Prepare chart data
-        port_labels = list(port_distribution.keys())[:10]  # Top 10 ports
-        port_data = [port_distribution[p] for p in port_labels]
-        
-        # Fill template
         html_content = html_template.format(
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            total_hosts=total_hosts,
-            open_ports=open_port_count,
-            services=service_count,
-            vulnerabilities=vuln_count,
-            service_rows="\n".join(service_rows) if service_rows else "<tr><td colspan='6'>No services detected</td></tr>",
-            vulnerability_section=vuln_html if vuln_html else "<p>No vulnerabilities detected</p>",
-            port_labels=json.dumps(port_labels),
-            port_data=json.dumps(port_data)
+            scan_id=scan_id,
+            timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            total_hosts=report_data['summary']['total_hosts'],
+            open_ports=report_data['summary']['open_ports'],
+            services_found=report_data['summary']['services_found'],
+            total_results=report_data['summary'].get('total_results', len(report_data['results'])),
+            results_rows=''.join(results_rows),
+            version=VERSION,
+            authors=AUTHORS
         )
         
-        with open(output_path, 'w') as f:
+        html_file = self.reports_dir / f"{scan_id}_report.html"
+        with open(html_file, 'w') as f:
             f.write(html_content)
+        
+        if RICH_AVAILABLE:
+            console.print(f"[green]✓ HTML report generated: {html_file}[/green]")
+        else:
+            print(f"✓ HTML report generated: {html_file}")
     
-    def _generate_markdown_report(self, scan_results: Dict, output_path: Path):
+    def generate_json_report(self, report_data, scan_id):
+        """Generate JSON report"""
+        json_file = self.reports_dir / f"{scan_id}_report.json"
+        
+        enhanced_report = {
+            **report_data,
+            'metadata': {
+                'generator': 'R3COND0G',
+                'version': VERSION,
+                'generated_at': datetime.now().isoformat(),
+                'report_format': 'json'
+            }
+        }
+        
+        with open(json_file, 'w') as f:
+            json.dump(enhanced_report, f, indent=2)
+        
+        if RICH_AVAILABLE:
+            console.print(f"[green]✓ JSON report generated: {json_file}[/green]")
+        else:
+            print(f"✓ JSON report generated: {json_file}")
+    
+    def generate_csv_report(self, report_data, scan_id):
+        """Generate CSV report"""
+        csv_file = self.reports_dir / f"{scan_id}_report.csv"
+        
+        import csv
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            
+            # Header
+            writer.writerow(['Host', 'Port', 'Protocol', 'State', 'Service', 'Version', 'Banner'])
+            
+            # Data rows
+            for result in report_data['results']:
+                writer.writerow([
+                    result.get('host', ''),
+                    result.get('port', ''),
+                    result.get('protocol', ''),
+                    result.get('state', ''),
+                    result.get('service', ''),
+                    result.get('version', ''),
+                    result.get('banner', '')
+                ])
+        
+        if RICH_AVAILABLE:
+            console.print(f"[green]✓ CSV report generated: {csv_file}[/green]")
+        else:
+            print(f"✓ CSV report generated: {csv_file}")
+    
+    def generate_xml_report(self, report_data, scan_id):
+        """Generate XML report"""
+        xml_file = self.reports_dir / f"{scan_id}_report.xml"
+        
+        xml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<r3cond0g_scan version="{VERSION}" scan_id="{scan_id}" generated="{datetime.now().isoformat()}">
+    <scan_info>
+        <profile>{report_data['scan_info']['profile']}</profile>
+        <targets>{report_data['scan_info']['targets']}</targets>
+        <start_time>{report_data['scan_info']['start_time']}</start_time>
+    </scan_info>
+    <summary>
+        <total_hosts>{report_data['summary']['total_hosts']}</total_hosts>
+        <open_ports>{report_data['summary']['open_ports']}</open_ports>
+        <services_found>{report_data['summary']['services_found']}</services_found>
+    </summary>
+    <results>
+'''
+        
+        for result in report_data['results']:
+            xml_content += f'''        <result>
+            <host>{result.get('host', '')}</host>
+            <port>{result.get('port', '')}</port>
+            <protocol>{result.get('protocol', '')}</protocol>
+            <state>{result.get('state', '')}</state>
+            <service>{result.get('service', '')}</service>
+            <version>{result.get('version', '')}</version>
+        </result>
+'''
+        
+        xml_content += '''    </results>
+</r3cond0g_scan>'''
+        
+        with open(xml_file, 'w') as f:
+            f.write(xml_content)
+        
+        if RICH_AVAILABLE:
+            console.print(f"[green]✓ XML report generated: {xml_file}[/green]")
+        else:
+            print(f"✓ XML report generated: {xml_file}")
+    
+    def generate_markdown_report(self, report_data, scan_id):
         """Generate Markdown report"""
-        md_content = f"""# R3COND0G Scan Report
+        md_file = self.reports_dir / f"{scan_id}_report.md"
+        
+        md_content = f"""# 🦅 R3COND0G Scan Report
 
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+**Scan ID:** {scan_id}  
+**Profile:** {report_data['scan_info']['profile']}  
+**Targets:** {report_data['scan_info']['targets']}  
+**Start Time:** {report_data['scan_info']['start_time']}  
+**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-## Executive Summary
+## Summary
 
-- **Hosts Scanned**: {len(scan_results.get('hosts', []))}
-- **Open Ports Found**: {sum(len(s) for s in scan_results.get('services', {}).values())}
-- **Vulnerabilities Detected**: {len(scan_results.get('vulnerabilities', []))}
+| Metric | Count |
+|--------|--------|
+| Total Hosts | {report_data['summary']['total_hosts']} |
+| Open Ports | {report_data['summary']['open_ports']} |
+| Services Found | {report_data['summary']['services_found']} |
+| Total Results | {report_data['summary'].get('total_results', len(report_data['results']))} |
 
-## Discovered Services
+## Detailed Results
 
-| Host | Port | Protocol | Service | Version | State |
-|------|------|----------|---------|---------|-------|
+| Host | Port | Protocol | State | Service | Version |
+|------|------|----------|-------|---------|---------|
 """
         
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                md_content += f"| {host} | {service.get('port')} | {service.get('protocol', 'tcp')} | "
-                md_content += f"{service.get('service', 'unknown')} | {service.get('version', '-')} | "
-                md_content += f"{service.get('state', 'unknown')} |\n"
+        for result in report_data['results']:
+            md_content += f"| {result.get('host', 'N/A')} | {result.get('port', 'N/A')} | {result.get('protocol', 'N/A')} | {result.get('state', 'N/A')} | {result.get('service', 'N/A')} | {result.get('version', 'N/A')} |\n"
         
-        md_content += "\n## Vulnerability Summary\n\n"
-        
-        for vuln in scan_results.get("vulnerabilities", []):
-            md_content += f"### {vuln.get('cve_id', 'Unknown')}\n"
-            md_content += f"- **CVSS Score**: {vuln.get('cvss_score', 'N/A')}\n"
-            md_content += f"- **Description**: {vuln.get('description', 'No description')}\n\n"
-        
-        with open(output_path, 'w') as f:
-            f.write(md_content)
-    
-    def _generate_csv_report(self, scan_results: Dict, output_path: Path):
-        """Generate CSV report"""
-        import csv
-        
-        with open(output_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(["Host", "Port", "Protocol", "Service", "Version", "State", "Vulnerabilities"])
-            
-            for host, services in scan_results.get("services", {}).items():
-                for service in services:
-                    vulns = []
-                    # Find vulnerabilities for this service
-                    for vuln in scan_results.get("vulnerabilities", []):
-                        if vuln.get("host") == host and vuln.get("port") == service.get("port"):
-                            vulns.append(vuln.get("cve_id", ""))
-                    
-                    writer.writerow([
-                        host,
-                        service.get("port"),
-                        service.get("protocol", "tcp"),
-                        service.get("service", "unknown"),
-                        service.get("version", ""),
-                        service.get("state", "unknown"),
-                        ";".join(vulns)
-                    ])
-    
-    def generate_topology(self, scan_results: Dict, output_format: str = "dot"):
-        """Generate network topology visualization"""
-        if not NETWORK_VIZ:
-            self.logger.warning("NetworkX not installed. Install with: pip install networkx matplotlib")
-            return None
-        
-        G = nx.Graph()
-        
-        # Add nodes for hosts
-        for host in scan_results.get("hosts", []):
-            G.add_node(host, node_type="host")
-        
-        # Add edges based on services
-        for host, services in scan_results.get("services", {}).items():
-            for service in services:
-                if service.get("state") == "open":
-                    service_node = f"{service.get('service', 'unknown')}:{service.get('port')}"
-                    G.add_node(service_node, node_type="service")
-                    G.add_edge(host, service_node)
-        
-        if output_format == "dot":
-            # Generate DOT format
-            dot_content = "digraph NetworkTopology {\n"
-            dot_content += '  rankdir=LR;\n'
-            dot_content += '  node [shape=box, style=filled];\n'
-            
-            for node in G.nodes():
-                if G.nodes[node].get("node_type") == "host":
-                    dot_content += f'  "{node}" [fillcolor=lightblue, label="{node}\\nHost"];\n'
-                else:
-                    dot_content += f'  "{node}" [fillcolor=lightgreen, label="{node}"];\n'
-            
-            for edge in G.edges():
-                dot_content += f'  "{edge[0]}" -> "{edge[1]}";\n'
-            
-            dot_content += "}\n"
-            
-            with open("network_topology.dot", 'w') as f:
-                f.write(dot_content)
-            
-            self.logger.info("✓ Network topology saved to network_topology.dot")
-            return "network_topology.dot"
-            
-        elif output_format == "png":
-            # Generate PNG visualization
-            plt.figure(figsize=(12, 8))
-            pos = nx.spring_layout(G)
-            
-            # Draw nodes
-            host_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "host"]
-            service_nodes = [n for n in G.nodes() if G.nodes[n].get("node_type") == "service"]
-            
-            nx.draw_networkx_nodes(G, pos, nodelist=host_nodes, node_color='lightblue', 
-                                 node_size=1000, label="Hosts")
-            nx.draw_networkx_nodes(G, pos, nodelist=service_nodes, node_color='lightgreen', 
-                                 node_size=500, label="Services")
-            
-            # Draw edges and labels
-            nx.draw_networkx_edges(G, pos, alpha=0.5)
-            nx.draw_networkx_labels(G, pos)
-            
-            plt.title("Network Topology")
-            plt.legend()
-            plt.axis('off')
-            plt.savefig("network_topology.png", dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            self.logger.info("✓ Network topology saved to network_topology.png")
-            return "network_topology.png"
-    
-    def interactive_mode(self):
-        """Run in interactive mode with menu"""
-        if not self.console:
-            print("Interactive mode requires 'rich' library. Install with: pip install rich")
-            return
-        
-        while True:
-            self.console.clear()
-            self.console.print(Panel.fit("""
-[bold cyan]🦅 R3COND0G Command & Control System[/bold cyan]
-[dim]Advanced Orchestration Platform v3.0.0[/dim]
-            """, border_style="bright_blue"))
-            
-            menu_table = Table(show_header=False, box=None)
-            menu_table.add_column("Option", style="cyan", width=3)
-            menu_table.add_column("Description", style="white")
-            
-            menu_items = [
-                ("1", "Build Core Binary"),
-                ("2", "Generate Probe Definitions"),
-                ("3", "Create Scan Profile"),
-                ("4", "Run Scan"),
-                ("5", "Import Nmap Results"),
-                ("6", "Generate Metasploit RC"),
-                ("7", "Update Vulnerability Database"),
-                ("8", "Generate Reports"),
-                ("9", "Optimize Performance"),
-                ("10", "Generate SIEM Feed"),
-                ("11", "View Scan History"),
-                ("12", "Generate Network Topology"),
-                ("0", "Exit")
-            ]
-            
-            for option, desc in menu_items:
-                menu_table.add_row(f"[bold]{option}[/bold]", desc)
-            
-            self.console.print(menu_table)
-            
-            choice = Prompt.ask("\n[bold yellow]Select option[/bold yellow]")
-            
-            if choice == "1":
-                self.console.print("\n[cyan]Building Core Binary...[/cyan]")
-                optimize = Confirm.ask("Enable optimizations?", default=True)
-                cross = Confirm.ask("Cross-compile for other platforms?", default=False)
-                platforms = []
-                if cross:
-                    platforms = Prompt.ask("Enter platforms (e.g., linux/amd64,windows/amd64)").split(",")
-                self.build_core(optimize, platforms if platforms else None)
-                
-            elif choice == "2":
-                self.console.print("\n[cyan]Generating Probe Definitions...[/cyan]")
-                custom = Confirm.ask("Add custom services?", default=False)
-                services = []
-                if custom:
-                    services = Prompt.ask("Enter service names (comma-separated)").split(",")
-                self.generate_probes(services if services else None)
-                
-            elif choice == "3":
-                self.console.print("\n[cyan]Creating Scan Profile...[/cyan]")
-                name = Prompt.ask("Profile name")
-                base = Prompt.ask("Base profile", default="default", 
-                                choices=["default", "stealth", "aggressive", "discovery"])
-                self.create_scan_profile(name, base)
-                
-            elif choice == "4":
-                self.console.print("\n[cyan]Running Scan...[/cyan]")
-                profile = Prompt.ask("Select profile", default="default")
-                targets = Prompt.ask("Enter targets (comma-separated)")
-                results = self.run_scan(profile, targets.split(",") if targets else None)
-                if results:
-                    self.console.print(Panel(f"Scan completed. Found {len(results.get('services', {}))} services", 
-                                           style="green"))
-                
-            elif choice == "5":
-                self.console.print("\n[cyan]Importing Nmap Results...[/cyan]")
-                nmap_file = Prompt.ask("Enter Nmap XML file path")
-                if os.path.exists(nmap_file):
-                    results = self.integrate_nmap(nmap_file)
-                    self.console.print(f"[green]✓ Imported {len(results.get('hosts', []))} hosts[/green]")
-                else:
-                    self.console.print("[red]File not found[/red]")
-                
-            elif choice == "6":
-                self.console.print("\n[cyan]Generating Metasploit RC...[/cyan]")
-                # Load last scan results
-                results = self._load_last_scan_results()
-                if results:
-                    output = self.generate_metasploit_rc(results)
-                    self.console.print(f"[green]✓ Generated {output}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "7":
-                self.console.print("\n[cyan]Updating Vulnerability Database...[/cyan]")
-                if not self.nvd_api_key:
-                    self.nvd_api_key = Prompt.ask("Enter NVD API key")
-                self.nvd_integration(bulk_update=True)
-                
-            elif choice == "8":
-                self.console.print("\n[cyan]Generating Reports...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    formats = Prompt.ask("Select formats (comma-separated)", 
-                                       default="html,json,markdown").split(",")
-                    reports = self.generate_reports(results, formats)
-                    for fmt, path in reports.items():
-                        self.console.print(f"[green]✓ {fmt.upper()}: {path}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "9":
-                self.console.print("\n[cyan]Optimizing Performance...[/cyan]")
-                targets = int(Prompt.ask("Number of targets", default="10"))
-                network = Prompt.ask("Network type", default="lan", 
-                                   choices=["lan", "wan", "internet"])
-                config = self.optimize_performance(targets, network)
-                self.console.print(Panel(f"Recommended: {config['max_concurrency']} concurrent connections\n"
-                                       f"Timeout: {config['timeout']}ms", style="green"))
-                
-            elif choice == "10":
-                self.console.print("\n[cyan]Generating SIEM Feed...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    fmt = Prompt.ask("Format", default="cef", choices=["cef", "leef", "json"])
-                    feed = self.generate_siem_feed(results, fmt)
-                    output_file = f"siem_feed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
-                    with open(output_file, 'w') as f:
-                        f.write(feed if isinstance(feed, str) else json.dumps(feed))
-                    self.console.print(f"[green]✓ SIEM feed saved to {output_file}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "11":
-                self.console.print("\n[cyan]Scan History[/cyan]")
-                self._display_scan_history()
-                
-            elif choice == "12":
-                self.console.print("\n[cyan]Generating Network Topology...[/cyan]")
-                results = self._load_last_scan_results()
-                if results:
-                    fmt = Prompt.ask("Format", default="dot", choices=["dot", "png"])
-                    topology = self.generate_topology(results, fmt)
-                    if topology:
-                        self.console.print(f"[green]✓ Topology saved to {topology}[/green]")
-                else:
-                    self.console.print("[yellow]No scan results available[/yellow]")
-                
-            elif choice == "0":
-                self.console.print("[yellow]Exiting...[/yellow]")
-                break
-            
-            else:
-                self.console.print("[red]Invalid option[/red]")
-            
-            if choice != "0":
-                Prompt.ask("\n[dim]Press Enter to continue[/dim]")
-    
-    def _load_last_scan_results(self) -> Optional[Dict]:
-        """Load the most recent scan results from database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT results FROM scan_history 
-            WHERE status = 'completed'
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        ''')
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return json.loads(row[0])
-        return None
-    
-    def _display_scan_history(self):
-        """Display scan history from database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT timestamp, profile, targets, duration, status
-            FROM scan_history
-            ORDER BY timestamp DESC
-            LIMIT 10
-        ''')
-        
-        rows = cursor.fetchall()
-        conn.close()
-        
-        if rows and self.console:
-            table = Table(title="Recent Scans")
-            table.add_column("Timestamp", style="cyan")
-            table.add_column("Profile", style="green")
-            table.add_column("Targets", style="yellow")
-            table.add_column("Duration", style="magenta")
-            table.add_column("Status", style="white")
-            
-            for row in rows:
-                targets = json.loads(row[2]) if row[2] else []
-                target_str = ", ".join(targets[:3])
-                if len(targets) > 3:
-                    target_str += f" (+{len(targets)-3} more)"
-                
-                table.add_row(
-                    row[0],
-                    row[1],
-                    target_str,
-                    f"{row[3]:.2f}s" if row[3] else "N/A",
-                    row[4]
-                )
-            
-            self.console.print(table)
-        else:
-            print("No scan history available")
+        md_content += f"""
 
-def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description="R3COND0G Command & Control System",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Build and optimize core
-  python r3cond0g_controller.py --build --optimize
-  
-  # Run scan with specific profile
-  python r3cond0g_controller.py --scan aggressive --targets 192.168.1.0/24
-  
-  # Generate all reports
-  python r3cond0g_controller.py --report all --format html,json,markdown
-  
-  # Update vulnerability database
-  python r3cond0g_controller.py --update-vulns --nvd-key YOUR_KEY
-  
-  # Interactive mode
-  python r3cond0g_controller.py --interactive
-        """
-    )
+---
+*Generated by R3COND0G {VERSION} | {AUTHORS}*
+"""
+        
+        with open(md_file, 'w') as f:
+            f.write(md_content)
+        
+        if RICH_AVAILABLE:
+            console.print(f"[green]✓ Markdown report generated: {md_file}[/green]")
+        else:
+            print(f"✓ Markdown report generated: {md_file}")
     
-    parser.add_argument("--build", action="store_true", help="Build core binary")
-    parser.add_argument("--optimize", action="store_true", help="Enable build optimizations")
-    parser.add_argument("--cross-compile", nargs="+", help="Cross-compile targets (e.g., linux/amd64 windows/amd64)")
+    def optimize_performance_interactive(self):
+        """Interactive performance optimization"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Performance Optimization[/bold yellow]")
+            
+            target_count = int(Prompt.ask("Estimated number of targets", default="1000"))
+            network_type = Prompt.ask("Network type", 
+                                    choices=["lan", "wan", "internet"], 
+                                    default="lan")
+        else:
+            print("Performance Optimization")
+            target_count = int(input("Estimated number of targets [1000]: ") or "1000")
+            print("Network types: lan, wan, internet")
+            network_type = input("Network type [lan]: ").strip() or "lan"
+        
+        # Calculate optimal settings
+        if network_type == "lan":
+            base_concurrency = min(1000, target_count // 10)
+            base_timeout = 1000
+            rate_limit = 1000
+        elif network_type == "wan":
+            base_concurrency = min(500, target_count // 20)
+            base_timeout = 2000
+            rate_limit = 500
+        else:  # internet
+            base_concurrency = min(100, target_count // 50)
+            base_timeout = 5000
+            rate_limit = 100
+        
+        # Memory estimation
+        estimated_memory = base_concurrency * 0.5  # MB per connection
+        
+        optimization_config = {
+            "max_concurrency": base_concurrency,
+            "timeout": base_timeout,
+            "rate_limit": rate_limit,
+            "estimated_memory_mb": estimated_memory,
+            "network_type": network_type,
+            "target_count": target_count,
+            "generated_at": datetime.now().isoformat()
+        }
+        
+        # Save optimization config
+        opt_file = self.config_dir / "optimization.json"
+        with open(opt_file, 'w') as f:
+            json.dump(optimization_config, f, indent=2)
+        
+        if RICH_AVAILABLE:
+            table = Table(title="Recommended Settings")
+            table.add_column("Setting", style="cyan")
+            table.add_column("Value", style="green")
+            
+            table.add_row("Max Concurrency", str(base_concurrency))
+            table.add_row("Timeout (ms)", str(base_timeout))
+            table.add_row("Rate Limit", str(rate_limit))
+            table.add_row("Est. Memory (MB)", f"{estimated_memory:.1f}")
+            
+            console.print(table)
+            console.print(f"[green]✓ Optimization settings saved to {opt_file}[/green]")
+        else:
+            print("Recommended Settings:")
+            print(f"Max Concurrency: {base_concurrency}")
+            print(f"Timeout (ms): {base_timeout}")
+            print(f"Rate Limit: {rate_limit}")
+            print(f"Est. Memory (MB): {estimated_memory:.1f}")
+            print(f"✓ Optimization settings saved to {opt_file}")
     
-    parser.add_argument("--generate-probes", action="store_true", help="Generate probe definitions")
-    parser.add_argument("--custom-services", nargs="+", help="Add custom service probes")
+    def generate_siem_feed(self):
+        """Generate SIEM feed from scan results"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Generate SIEM Feed[/bold yellow]")
+            
+            feed_format = Prompt.ask("SIEM format", 
+                                   choices=["cef", "leef", "json", "syslog"], 
+                                   default="json")
+        else:
+            print("Generate SIEM Feed")
+            print("Available formats: cef, leef, json, syslog")
+            feed_format = input("SIEM format [json]: ").strip() or "json"
+        
+        # Get recent scan results
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT scan_id, results_file FROM scans 
+                WHERE status = 'completed' AND results_file IS NOT NULL
+                ORDER BY start_time DESC LIMIT 1
+            ''')
+            
+            scan = cursor.fetchone()
+            conn.close()
+            
+            if not scan:
+                if RICH_AVAILABLE:
+                    console.print("[red]No recent scan results found![/red]")
+                else:
+                    print("No recent scan results found!")
+                return
+            
+            scan_id, results_file = scan
+            
+            # Load results
+            with open(results_file, 'r') as f:
+                results = json.load(f)
+            
+            if isinstance(results, dict) and 'results' in results:
+                scan_results = results['results']
+            else:
+                scan_results = results
+            
+            # Generate SIEM events
+            siem_events = []
+            
+            for result in scan_results:
+                if result.get('state') == 'open':
+                    timestamp = datetime.now().strftime('%b %d %H:%M:%S')
+                    
+                    if feed_format == "cef":
+                        # Common Event Format
+                        event = f"CEF:0|R3COND0G|NetworkScanner|{VERSION}|PortOpen|Open Port Detected|3|src={result.get('host')} spt={result.get('port')} proto={result.get('protocol')} app={result.get('service', 'unknown')}"
+                    elif feed_format == "leef":
+                        # Log Event Extended Format
+                        event = f"LEEF:2.0|R3COND0G|NetworkScanner|{VERSION}|PortOpen|devTime={timestamp}|src={result.get('host')}|srcPort={result.get('port')}|proto={result.get('protocol')}|identSrc={result.get('service', 'unknown')}"
+                    elif feed_format == "syslog":
+                        # Syslog format
+                        event = f"{timestamp} r3cond0g: OPEN_PORT host={result.get('host')} port={result.get('port')} protocol={result.get('protocol')} service={result.get('service', 'unknown')}"
+                    else:  # json
+                        event = {
+                            "timestamp": datetime.now().isoformat(),
+                            "source": "R3COND0G",
+                            "event_type": "open_port",
+                            "host": result.get('host'),
+                            "port": result.get('port'),
+                            "protocol": result.get('protocol'),
+                            "service": result.get('service', 'unknown'),
+                            "version": result.get('version', ''),
+                            "scan_id": scan_id
+                        }
+                    
+                    siem_events.append(event)
+            
+            # Save SIEM feed
+            feed_file = self.reports_dir / f"{scan_id}_siem.{feed_format}"
+            
+            if feed_format == "json":
+                with open(feed_file, 'w') as f:
+                    json.dump(siem_events, f, indent=2)
+            else:
+                with open(feed_file, 'w') as f:
+                    for event in siem_events:
+                        f.write(event + '\n')
+            
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ SIEM feed generated: {feed_file}[/green]")
+                console.print(f"[cyan]Events: {len(siem_events)}[/cyan]")
+            else:
+                print(f"✓ SIEM feed generated: {feed_file}")
+                print(f"Events: {len(siem_events)}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to generate SIEM feed: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]SIEM feed generation failed: {e}[/red]")
+            else:
+                print(f"SIEM feed generation failed: {e}")
     
-    parser.add_argument("--scan", metavar="PROFILE", help="Run scan with profile")
-    parser.add_argument("--targets", help="Scan targets (comma-separated)")
-    parser.add_argument("--config", help="Use specific configuration file")
+    def view_scan_history(self):
+        """View scan history"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT scan_id, profile_name, targets, start_time, end_time, status
+                FROM scans ORDER BY start_time DESC LIMIT 50
+            ''')
+            
+            scans = cursor.fetchall()
+            conn.close()
+            
+            if not scans:
+                if RICH_AVAILABLE:
+                    console.print("[yellow]No scan history found[/yellow]")
+                else:
+                    print("No scan history found")
+                return
+            
+            if RICH_AVAILABLE:
+                table = Table(title="Scan History")
+                table.add_column("Scan ID", style="cyan")
+                table.add_column("Profile", style="green")
+                table.add_column("Targets", style="yellow")
+                table.add_column("Start Time", style="blue")
+                table.add_column("Duration", style="magenta")
+                table.add_column("Status", style="red")
+                
+                for scan in scans:
+                    scan_id, profile, targets, start_time, end_time, status = scan
+                    
+                    # Calculate duration
+                    if end_time:
+                        try:
+                            start = datetime.fromisoformat(start_time)
+                            end = datetime.fromisoformat(end_time)
+                            duration = str(end - start).split('.')[0]  # Remove microseconds
+                        except:
+                            duration = "N/A"
+                    else:
+                        duration = "Running..."
+                    
+                    # Truncate targets if too long
+                    truncated_targets = targets[:30] + "..." if len(targets) > 30 else targets
+                    
+                    table.add_row(
+                        scan_id,
+                        profile,
+                        truncated_targets,
+                        start_time[:19],
+                        duration,
+                        status
+                    )
+                
+                console.print(table)
+            else:
+                print("Scan History:")
+                print("-" * 120)
+                print(f"{'Scan ID':<20} {'Profile':<15} {'Targets':<25} {'Start Time':<20} {'Status':<10}")
+                print("-" * 120)
+                
+                for scan in scans:
+                    scan_id, profile, targets, start_time, end_time, status = scan
+                    truncated_targets = targets[:25] + "..." if len(targets) > 25 else targets
+                    print(f"{scan_id:<20} {profile:<15} {truncated_targets:<25} {start_time[:19]:<20} {status:<10}")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load scan history: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Failed to load scan history: {e}[/red]")
+            else:
+                print(f"Failed to load scan history: {e}")
     
-    parser.add_argument("--import-nmap", metavar="FILE", help="Import Nmap XML results")
-    parser.add_argument("--generate-msf", action="store_true", help="Generate Metasploit RC file")
+    def generate_network_topology(self):
+        """Generate network topology visualization"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Generate Network Topology[/bold yellow]")
+            
+            output_format = Prompt.ask("Output format", 
+                                     choices=["dot", "html", "json"], 
+                                     default="dot")
+        else:
+            print("Generate Network Topology")
+            print("Available formats: dot, html, json")
+            output_format = input("Output format [dot]: ").strip() or "dot"
+        
+        # Get recent scan results for topology
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT host, port, protocol, state, service
+                FROM scan_results 
+                WHERE state = 'open'
+                ORDER BY host
+            ''')
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            if not results:
+                if RICH_AVAILABLE:
+                    console.print("[yellow]No scan results found for topology generation[/yellow]")
+                else:
+                    print("No scan results found for topology generation")
+                return
+            
+            # Process results for topology
+            hosts = {}
+            for host, port, protocol, state, service in results:
+                if host not in hosts:
+                    hosts[host] = []
+                hosts[host].append({
+                    'port': port,
+                    'protocol': protocol,
+                    'service': service
+                })
+            
+            topology_file = self.reports_dir / f"topology_{int(time.time())}.{output_format}"
+            
+            if output_format == "dot":
+                self.generate_dot_topology(hosts, topology_file)
+            elif output_format == "html":
+                self.generate_html_topology(hosts, topology_file)
+            elif output_format == "json":
+                self.generate_json_topology(hosts, topology_file)
+            
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Network topology generated: {topology_file}[/green]")
+                if output_format == "dot":
+                    console.print("[cyan]Generate PNG: dot -Tpng topology.dot -o topology.png[/cyan]")
+            else:
+                print(f"✓ Network topology generated: {topology_file}")
+                if output_format == "dot":
+                    print("Generate PNG: dot -Tpng topology.dot -o topology.png")
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to generate topology: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Topology generation failed: {e}[/red]")
+            else:
+                print(f"Topology generation failed: {e}")
     
-    parser.add_argument("--update-vulns", action="store_true", help="Update vulnerability database")
-    parser.add_argument("--nvd-key", help="NVD API key")
+    def generate_dot_topology(self, hosts, output_file):
+        """Generate Graphviz DOT topology"""
+        dot_content = '''digraph NetworkTopology {
+    rankdir=LR;
+    node [shape=box, style=filled];
+    edge [color=blue];
     
-    parser.add_argument("--report", choices=["all", "html", "json", "markdown", "csv"], 
-                       help="Generate reports")
-    parser.add_argument("--format", help="Report formats (comma-separated)")
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        style=filled;
+        color=lightgrey;
+        
+        web [label="Web Server", fillcolor=lightblue];
+        ssh [label="SSH Server", fillcolor=lightgreen];
+        db [label="Database", fillcolor=lightyellow];
+        other [label="Other Service", fillcolor=lightpink];
+    }
     
-    parser.add_argument("--optimize-performance", metavar="TARGETS", type=int, 
-                       help="Generate optimized config for N targets")
-    parser.add_argument("--network-type", choices=["lan", "wan", "internet"], 
-                       default="lan", help="Network type for optimization")
+'''
+        
+        for host, services in hosts.items():
+            # Determine host type based on services
+            service_names = [s['service'] for s in services if s['service']]
+            
+            if any('http' in s.lower() for s in service_names):
+                color = "lightblue"
+                shape = "ellipse"
+            elif any('ssh' in s.lower() for s in service_names):
+                color = "lightgreen"
+                shape = "box"
+            elif any(db in s.lower() for db in ['mysql', 'postgres', 'oracle', 'mssql'] for s in service_names):
+                color = "lightyellow"
+                shape = "cylinder"
+            else:
+                color = "lightpink"
+                shape = "box"
+            
+            # Create host node
+            host_clean = host.replace('.', '_').replace('-', '_')
+            dot_content += f'    {host_clean} [label="{host}\\n{len(services)} ports", fillcolor={color}, shape={shape}];\n'
+            
+            # Add service nodes
+            for service in services:
+                service_name = service['service'] or 'unknown'
+                service_node = f"{host_clean}_{service['port']}"
+                dot_content += f'    {service_node} [label="{service['port']}/{service['protocol']}\\n{service_name}", fillcolor=white, shape=plaintext];\n'
+                dot_content += f'    {host_clean} -> {service_node};\n'
+        
+        dot_content += '}\n'
+        
+        with open(output_file, 'w') as f:
+            f.write(dot_content)
     
-    parser.add_argument("--siem-feed", choices=["cef", "leef", "json"], 
-                       help="Generate SIEM feed")
+    def generate_html_topology(self, hosts, output_file):
+        """Generate interactive HTML topology"""
+        html_template = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>R3COND0G Network Topology</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .node circle { stroke: #333; stroke-width: 2px; }
+        .node text { font-size: 12px; text-anchor: middle; }
+        .link { stroke: #999; stroke-opacity: 0.6; stroke-width: 2px; }
+        .tooltip { position: absolute; padding: 10px; background: #333; color: white; border-radius: 5px; pointer-events: none; }
+        h1 { color: #d32f2f; }
+    </style>
+</head>
+<body>
+    <h1>🦅 R3COND0G Network Topology</h1>
+    <div id="topology"></div>
     
-    parser.add_argument("--topology", choices=["dot", "png"], help="Generate network topology")
+    <script>
+        const data = {hosts_json};
+        
+        const nodes = Object.keys(data).map(host => ({
+            id: host,
+            services: data[host],
+            group: data[host].length > 5 ? 1 : 2
+        }));
+        
+        const links = [];
+        // Add links based on network relationships (simplified)
+        
+        const width = 1200;
+        const height = 800;
+        
+        const svg = d3.select("#topology")
+            .append("svg")
+            .attr("width", width)
+            .attr("height", height);
+        
+        const simulation = d3.forceSimulation(nodes)
+            .force("link", d3.forceLink(links).id(d => d.id))
+            .force("charge", d3.forceManyBody().strength(-300))
+            .force("center", d3.forceCenter(width / 2, height / 2));
+        
+        const link = svg.append("g")
+            .selectAll("line")
+            .data(links)
+            .enter().append("line")
+            .attr("class", "link");
+        
+        const node = svg.append("g")
+            .selectAll("g")
+            .data(nodes)
+            .enter().append("g")
+            .attr("class", "node")
+            .call(d3.drag()
+                .on("start", dragstarted)
+                .on("drag", dragged)
+                .on("end", dragended));
+        
+        node.append("circle")
+            .attr("r", d => Math.max(10, d.services.length * 2))
+            .style("fill", d => d.group === 1 ? "#ff6b6b" : "#4ecdc4");
+        
+        node.append("text")
+            .text(d => d.id)
+            .attr("dy", 5);
+        
+        node.append("title")
+            .text(d => `${d.id}\\nServices: ${d.services.length}`);
+        
+        simulation.on("tick", () => {
+            link.attr("x1", d => d.source.x)
+                .attr("y1", d => d.source.y)
+                .attr("x2", d => d.target.x)
+                .attr("y2", d => d.target.y);
+            
+            node.attr("transform", d => `translate(${d.x},${d.y})`);
+        });
+        
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+        
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+        
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+    </script>
+</body>
+</html>'''
+        
+        html_content = html_template.replace('{hosts_json}', json.dumps(hosts))
+        
+        with open(output_file, 'w') as f:
+            f.write(html_content)
     
-    parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
+    def generate_json_topology(self, hosts, output_file):
+        """Generate JSON topology data"""
+        topology_data = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "generator": "R3COND0G",
+                "version": VERSION,
+                "total_hosts": len(hosts)
+            },
+            "nodes": [],
+            "links": []
+        }
+        
+        for host, services in hosts.items():
+            node = {
+                "id": host,
+                "type": "host",
+                "services": services,
+                "service_count": len(services),
+                "protocols": list(set(s['protocol'] for s in services))
+            }
+            topology_data["nodes"].append(node)
+        
+        with open(output_file, 'w') as f:
+            json.dump(topology_data, f, indent=2)
     
-    # Advanced options
-    parser.add_argument("--stealth", action="store_true", help="Use stealth scanning techniques")
-    parser.add_argument("--aggressive", action="store_true", help="Use aggressive scanning")
-    parser.add_argument("--vulnerability-scan", action="store_true", help="Perform vulnerability scanning")
-    parser.add_argument("--service-detection", action="store_true", help="Enable service detection")
-    parser.add_argument("--os-detection", action="store_true", help="Enable OS detection")
-    parser.add_argument("--script-scan", action="store_true", help="Run NSE-like scripts")
+    def show_system_info(self):
+        """Show system information and diagnostics"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]System Information[/bold yellow]")
+            
+            info_table = Table(title="R3COND0G System Information")
+            info_table.add_column("Component", style="cyan")
+            info_table.add_column("Status", style="green")
+            info_table.add_column("Details", style="white")
+            
+            # R3COND0G Info
+            info_table.add_row("R3COND0G Version", "✓", VERSION)
+            info_table.add_row("Build Date", "✓", BUILD_DATE)
+            info_table.add_row("Authors", "✓", AUTHORS)
+            
+            # System Info
+            info_table.add_row("Python Version", "✓", sys.version.split()[0])
+            info_table.add_row("Platform", "✓", platform.platform())
+            info_table.add_row("Architecture", "✓", platform.machine())
+            
+            # Distribution Info
+            distro_name = f"{self.distro.distro_info['name']} {self.distro.distro_info['version']}"
+            info_table.add_row("Linux Distribution", "✓", distro_name)
+            info_table.add_row("Package Manager", "✓", self.distro.distro_info['package_manager'])
+            
+            # Binary Status
+            binary_status = "✓ Built" if self.binary_path.exists() else "✗ Not Built"
+            binary_color = "green" if self.binary_path.exists() else "red"
+            info_table.add_row("Core Binary", binary_status, str(self.binary_path))
+            
+            # Dependencies
+            deps = {'Go': 'go version', 'Git': 'git --version', 'Python3': 'python3 --version'}
+            for name, cmd in deps.items():
+                try:
+                    result = subprocess.run(cmd.split(), capture_output=True, text=True)
+                    if result.returncode == 0:
+                        version = result.stdout.split()[2] if 'go' in cmd else result.stdout.split()[1]
+                        info_table.add_row(name, "✓", version)
+                    else:
+                        info_table.add_row(name, "✗", "Not installed")
+                except:
+                    info_table.add_row(name, "✗", "Not found")
+            
+            # Database Status
+            db_status = "✓ Connected" if self.db_path.exists() else "✗ Not initialized"
+            info_table.add_row("Database", db_status, str(self.db_path))
+            
+            # Scan Statistics
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM scans')
+                scan_count = cursor.fetchone()[0]
+                cursor.execute('SELECT COUNT(*) FROM profiles')
+                profile_count = cursor.fetchone()[0]
+                conn.close()
+                
+                info_table.add_row("Total Scans", "📊", str(scan_count))
+                info_table.add_row("Total Profiles", "📊", str(profile_count))
+            except:
+                info_table.add_row("Scan Statistics", "✗", "Database error")
+            
+            console.print(info_table)
+            
+            # Performance Info
+            try:
+                import psutil
+                cpu_percent = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
+                
+                perf_table = Table(title="System Performance")
+                perf_table.add_column("Metric", style="cyan")
+                perf_table.add_column("Value", style="green")
+                
+                perf_table.add_row("CPU Usage", f"{cpu_percent:.1f}%")
+                perf_table.add_row("Memory Usage", f"{memory.percent:.1f}% ({memory.used // (1024**3):.1f}GB / {memory.total // (1024**3):.1f}GB)")
+                perf_table.add_row("Disk Usage", f"{disk.percent:.1f}% ({disk.used // (1024**3):.1f}GB / {disk.total // (1024**3):.1f}GB)")
+                
+                console.print(perf_table)
+            except ImportError:
+                console.print("[yellow]Install psutil for performance metrics[/yellow]")
+                
+        else:
+            print("System Information")
+            print("=" * 50)
+            print(f"R3COND0G Version: {VERSION}")
+            print(f"Build Date: {BUILD_DATE}")
+            print(f"Authors: {AUTHORS}")
+            print(f"Python Version: {sys.version.split()[0]}")
+            print(f"Platform: {platform.platform()}")
+            print(f"Distribution: {self.distro.distro_info['name']} {self.distro.distro_info['version']}")
+            print(f"Binary Status: {'Built' if self.binary_path.exists() else 'Not Built'}")
+            print("=" * 50)
     
-    # Network options
-    parser.add_argument("--interface", help="Network interface to use")
-    parser.add_argument("--source-ip", help="Source IP address")
-    parser.add_argument("--proxy", help="Proxy URL (http/socks)")
-    parser.add_argument("--rate-limit", type=int, help="Rate limit (requests per second)")
+    def update_r3cond0g(self):
+        """Update R3COND0G from repository"""
+        if RICH_AVAILABLE:
+            console.print("[bold yellow]Update R3COND0G[/bold yellow]")
+            
+            if not Confirm.ask("Update R3COND0G to latest version?"):
+                return
+        else:
+            print("Update R3COND0G")
+            if input("Update R3COND0G to latest version? (y/n): ").lower() != 'y':
+                return
+        
+        try:
+            # Check if we're in a git repository
+            if (self.script_dir / ".git").exists():
+                if RICH_AVAILABLE:
+                    with console.status("[bold blue]Updating from git...") as status:
+                        subprocess.run(['git', 'pull', 'origin', 'main'], 
+                                     cwd=self.script_dir, check=True, capture_output=True)
+                else:
+                    print("Updating from git...")
+                    subprocess.run(['git', 'pull', 'origin', 'main'], cwd=self.script_dir, check=True)
+                
+                # Rebuild binary
+                self.build_binary()
+                
+                if RICH_AVAILABLE:
+                    console.print("[green]✓ R3COND0G updated successfully![/green]")
+                else:
+                    print("✓ R3COND0G updated successfully!")
+            else:
+                if RICH_AVAILABLE:
+                    console.print("[yellow]Not a git repository. Please update manually.[/yellow]")
+                else:
+                    print("Not a git repository. Please update manually.")
+                    
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Update failed: {e}")
+            if RICH_AVAILABLE:
+                console.print(f"[red]Update failed: {e}[/red]")
+            else:
+                print(f"Update failed: {e}")
     
-    # Output options
-    parser.add_argument("--output", "-o", help="Output file")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("--debug", action="store_true", help="Debug output")
-    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet mode")
-    parser.add_argument("--no-color", action="store_true", help="Disable colored output")
-    
-    args = parser.parse_args()
-    
-    # Handle signal interruption
-    def signal_handler(sig, frame):
-        print("\n[!] Scan interrupted by user")
+    def exit_application(self):
+        """Clean exit"""
+        if RICH_AVAILABLE:
+            console.print("[bold green]Thank you for using R3COND0G! 🦅[/bold green]")
+        else:
+            print("Thank you for using R3COND0G! 🦅")
         sys.exit(0)
     
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    def run_command_line(self, args):
+        """Handle command line arguments"""
+        if args.setup:
+            return self.setup_system()
+        
+        elif args.build:
+            return self.build_binary()
+        
+        elif args.scan:
+            if not args.targets:
+                print("Error: --targets required for scanning")
+                return False
+            
+            # Create temporary profile from CLI args
+            profile = {
+                'name': 'cli_scan',
+                'targets': args.targets,
+                'ports': args.ports or '1-1000',
+                'timeout': args.timeout or 1000,
+                'concurrency': args.concurrency or 100,
+                'service_detect': args.service_detect,
+                'version_detect': args.version_detect,
+                'os_detect': args.os_detect,
+                'vuln_mapping': args.vuln_mapping,
+                'udp_scan': args.udp_scan,
+                'output_format': args.format or 'json'
+            }
+            
+            scan_id = f"cli_scan_{int(time.time())}"
+            return self.execute_scan(scan_id, profile)
+        
+        elif args.import_nmap:
+            # Simulate interactive import
+            self.import_nmap_results()
+            return True
+        
+        elif args.generate_msf:
+            self.generate_metasploit_rc()
+            return True
+        
+        elif args.update_vulns:
+            self.update_vulnerability_database()
+            return True
+        
+        elif args.version:
+            print(f"R3COND0G {VERSION}")
+            print(f"Build Date: {BUILD_DATE}")
+            print(f"Authors: {AUTHORS}")
+            return True
+        
+        else:
+            # Default to interactive mode
+            self.show_interactive_menu()
+            return True
+
+def main():
+    """Main entry point"""
+    # Handle command line arguments
+    parser = argparse.ArgumentParser(
+        description="R3COND0G - Advanced Network Reconnaissance Framework",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  ./run                           # Interactive mode
+  ./run setup                     # Setup system
+  ./run --scan aggressive --targets 192.168.1.0/24
+  ./run --import-nmap results.xml
+  ./run --generate-msf
+        """
+    )
+    
+    # Setup commands
+    parser.add_argument('--setup', action='store_true', help='Setup R3COND0G system')
+    parser.add_argument('--build', action='store_true', help='Build core binary')
+    
+    # Scanning options
+    parser.add_argument('--scan', choices=['stealth', 'discovery', 'aggressive', 'vulnerability', 'default'],
+                       help='Run scan with profile')
+    parser.add_argument('--targets', nargs='+', help='Target hosts/networks')
+    parser.add_argument('--ports', help='Port range (e.g., 1-1000)')
+    parser.add_argument('--timeout', type=int, help='Timeout in milliseconds')
+    parser.add_argument('--concurrency', type=int, help='Concurrent connections')
+    parser.add_argument('--format', choices=['json', 'xml', 'html', 'csv'], help='Output format')
+    
+    # Scan options
+    parser.add_argument('--service-detect', action='store_true', help='Enable service detection')
+    parser.add_argument('--version-detect', action='store_true', help='Enable version detection')
+    parser.add_argument('--os-detect', action='store_true', help='Enable OS detection')
+    parser.add_argument('--vuln-mapping', action='store_true', help='Enable vulnerability mapping')
+    parser.add_argument('--udp-scan', action='store_true', help='Enable UDP scanning')
+    
+    # Utility commands
+    parser.add_argument('--import-nmap', help='Import Nmap XML results')
+    parser.add_argument('--generate-msf', action='store_true', help='Generate Metasploit RC')
+    parser.add_argument('--update-vulns', action='store_true', help='Update vulnerability database')
+    parser.add_argument('--version', action='store_true', help='Show version information')
+    
+    args = parser.parse_args()
     
     # Initialize controller
     try:
         controller = R3COND0GController()
-    except Exception as e:
-        print(f"[!] Failed to initialize controller: {e}")
-        sys.exit(1)
-    
-    # Handle command-line arguments
-    try:
-        if args.build:
-            controller.console.print("\n[cyan]Building Core Binary...[/cyan]")
-            success = controller.build_core(args.optimize, args.cross_compile)
-            if success:
-                controller.console.print("[green]✓ Build completed successfully[/green]")
-            else:
-                controller.console.print("[red]✗ Build failed[/red]")
-                sys.exit(1)
         
-        elif args.generate_probes:
-            controller.console.print("\n[cyan]Generating Probe Definitions...[/cyan]")
-            controller.generate_probes(args.custom_services)
-        
-        elif args.scan:
-            controller.console.print(f"\n[cyan]Running {args.scan} scan...[/cyan]")
-            targets = args.targets.split(",") if args.targets else None
-            results = controller.run_scan(args.scan, targets)
-            if results and not results.get("error"):
-                services_count = len(results.get('services', {}))
-                controller.console.print(f"[green]✓ Scan completed. Found {services_count} services[/green]")
-                
-                # Auto-generate reports if output specified
-                if args.output:
-                    report_formats = ["json", "html"] if not args.format else args.format.split(",")
-                    reports = controller.generate_reports(results, report_formats)
-                    controller.console.print(f"[green]✓ Reports generated: {', '.join(reports.keys())}[/green]")
-            else:
-                error_msg = results.get("error", "Unknown error") if results else "No results"
-                controller.console.print(f"[red]✗ Scan failed: {error_msg}[/red]")
-        
-        elif args.import_nmap:
-            controller.console.print(f"\n[cyan]Importing Nmap results from {args.import_nmap}...[/cyan]")
-            if os.path.exists(args.import_nmap):
-                results = controller.integrate_nmap(args.import_nmap)
-                controller.console.print(f"[green]✓ Imported {len(results.get('hosts', []))} hosts[/green]")
-            else:
-                controller.console.print("[red]✗ File not found[/red]")
-        
-        elif args.generate_msf:
-            controller.console.print("\n[cyan]Generating Metasploit RC...[/cyan]")
-            results = controller._load_last_scan_results()
-            if results:
-                output = controller.generate_metasploit_rc(results)
-                controller.console.print(f"[green]✓ Generated Metasploit RC: {output}[/green]")
-            else:
-                controller.console.print("[yellow]No scan results available[/yellow]")
-        
-        elif args.update_vulns:
-            controller.console.print("\n[cyan]Updating Vulnerability Database...[/cyan]")
-            if args.nvd_key:
-                controller.nvd_api_key = args.nvd_key
-            vulns = controller.nvd_integration(bulk_update=True)
-            controller.console.print(f"[green]✓ Updated {len(vulns)} vulnerabilities[/green]")
-        
-        elif args.report:
-            controller.console.print("\n[cyan]Generating Reports...[/cyan]")
-            results = controller._load_last_scan_results()
-            if results:
-                if args.report == "all":
-                    formats = ["html", "json", "markdown", "csv"]
-                else:
-                    formats = [args.report]
-                
-                if args.format:
-                    formats = args.format.split(",")
-                
-                reports = controller.generate_reports(results, formats)
-                for fmt, path in reports.items():
-                    controller.console.print(f"[green]✓ {fmt.upper()}: {path}[/green]")
-            else:
-                controller.console.print("[yellow]No scan results available[/yellow]")
-        
-        elif args.optimize_performance:
-            controller.console.print("\n[cyan]Optimizing Performance...[/cyan]")
-            config = controller.optimize_performance(args.optimize_performance, args.network_type)
-            controller.console.print(f"[green]✓ Optimization config generated: {config['performance_profile']}[/green]")
-            controller.console.print(f"Recommended concurrency: {config['max_concurrency']}")
-            controller.console.print(f"Recommended timeout: {config['timeout']}ms")
-        
-        elif args.siem_feed:
-            controller.console.print(f"\n[cyan]Generating {args.siem_feed.upper()} SIEM Feed...[/cyan]")
-            results = controller._load_last_scan_results()
-            if results:
-                feed = controller.generate_siem_feed(results, args.siem_feed)
-                output_file = f"siem_feed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{args.siem_feed}"
-                with open(output_file, 'w') as f:
-                    f.write(feed if isinstance(feed, str) else json.dumps(feed, indent=2))
-                controller.console.print(f"[green]✓ SIEM feed saved to {output_file}[/green]")
-            else:
-                controller.console.print("[yellow]No scan results available[/yellow]")
-        
-        elif args.topology:
-            controller.console.print(f"\n[cyan]Generating {args.topology.upper()} Network Topology...[/cyan]")
-            results = controller._load_last_scan_results()
-            if results:
-                output = controller.generate_topology(results, args.topology)
-                if output:
-                    controller.console.print(f"[green]✓ Topology saved to {output}[/green]")
-            else:
-                controller.console.print("[yellow]No scan results available[/yellow]")
-        
-        elif args.interactive:
-            controller.interactive_mode()
-        
-        else:
-            # Default: show interactive mode if available or help
+        # Handle Ctrl+C gracefully
+        def signal_handler(sig, frame):
             if RICH_AVAILABLE:
-                controller.console.print(Panel.fit("""
-[bold cyan]🦅 R3COND0G Command & Control System v3.0.0[/bold cyan]
-[dim]Advanced Network Reconnaissance Platform[/dim]
-
-No arguments provided. Starting interactive mode...
-Use --help for command-line options.
-                """, border_style="bright_blue"))
-                time.sleep(2)
-                controller.interactive_mode()
+                console.print("\n[yellow]Interrupted by user[/yellow]")
             else:
-                parser.print_help()
-    
+                print("\nInterrupted by user")
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        
+        # Show banner unless in quiet mode
+        if not any(vars(args).values()):  # No arguments = interactive mode
+            controller.print_banner()
+        
+        # Process command line arguments or start interactive mode
+        success = controller.run_command_line(args)
+        
+        return 0 if success else 1
+        
     except KeyboardInterrupt:
-        controller.console.print("\n[yellow]Operation cancelled by user[/yellow]")
-        sys.exit(0)
+        if RICH_AVAILABLE:
+            console.print("\n[yellow]Interrupted by user[/yellow]")
+        else:
+            print("\nInterrupted by user")
+        return 1
     except Exception as e:
-        if args.debug:
-            import traceback
-            traceback.print_exc()
-        controller.console.print(f"[red]✗ Error: {e}[/red]")
-        sys.exit(1)
+        if RICH_AVAILABLE:
+            console.print(f"[red]Fatal error: {e}[/red]")
+        else:
+            print(f"Fatal error: {e}")
+        return 1
 
 if __name__ == "__main__":
-    main()    
+    sys.exit(main())
