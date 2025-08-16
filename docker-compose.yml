@@ -1,0 +1,141 @@
+version: '3.8'
+
+services:
+  r3cond0g:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: r3cond0g:3.0.0
+    container_name: r3cond0g
+    hostname: r3cond0g
+    restart: unless-stopped
+    
+    # Network mode - host for full network access
+    network_mode: host
+    
+    # Required capabilities for network operations
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_PTRACE
+    
+    # Security options
+    security_opt:
+      - apparmor:unconfined
+    
+    # Environment variables
+    environment:
+      - R3COND0G_MODE=docker
+      - LOG_LEVEL=INFO
+      - MAX_CONCURRENCY=500
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      - TZ=${TZ:-UTC}
+    
+    # Volumes for persistence
+    volumes:
+      - ./cache:/opt/r3cond0g/cache
+      - ./reports:/opt/r3cond0g/reports
+      - ./probes:/opt/r3cond0g/probes
+      - ./configs:/opt/r3cond0g/configs
+      - /etc/localtime:/etc/localtime:ro
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 512M
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Interactive terminal
+    stdin_open: true
+    tty: true
+
+  # Optional: Web UI service (future feature)
+  r3cond0g-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: r3cond0g-web:3.0.0
+    container_name: r3cond0g-web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - API_ENDPOINT=http://r3cond0g:8081
+      - SECRET_KEY=${SECRET_KEY:-changeme}
+    depends_on:
+      - r3cond0g
+    volumes:
+      - ./reports:/app/static/reports:ro
+    profiles:
+      - web
+
+  # Optional: Database for result storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: r3cond0g-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=r3cond0g
+      - POSTGRES_USER=r3cond0g
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-r3cond0g_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    profiles:
+      - database
+
+  # Optional: Elasticsearch for advanced analytics
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: r3cond0g-elastic
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elastic_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    profiles:
+      - analytics
+
+  # Optional: Kibana for visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: r3cond0g-kibana
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    profiles:
+      - analytics
+
+volumes:
+  postgres_data:
+    driver: local
+  elastic_data:
+    driver: local
+
+# Network configuration (if not using host mode)
+networks:
+  r3cond0g:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
