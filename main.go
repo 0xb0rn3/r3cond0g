@@ -1,4 +1,874 @@
-package main
+// Scan a single port
+func (s *Scanner) scanPort(host string, port int, protocol string) *EnhancedScanResult {
+	startTime := time.Now()
+	
+	var result *EnhancedScanResult
+	
+	switch protocol {
+	case "tcp":
+		if s.config.SYNScan {
+			result = s.synScan(host, port)
+		} else {
+			result = s.tcpConnect(host, port)
+		}
+	case "udp":
+		result = s.udpScan(host, port)
+	}
+	
+	if result == nil {
+		return nil
+	}
+	
+	result.ResponseTime = time.Since(startTime)
+	result.Timestamp = time.Now()
+	
+	// Service detection
+	if result.State == "open" && s.config.ServiceDetect {
+		s.detectService(result)
+	}
+	
+	// Version detection
+	if result.State == "open" && s.config.VersionDetect {
+		s.detectVersion(result)
+	}
+	
+	// OS detection
+	if result.State == "open" && s.config.OSDetect {
+		s.detectOS(result)
+	}
+	
+	// Vulnerability mapping
+	if result.State == "open" && s.config.VulnMapping {
+		s.mapVulnerabilities(result)
+	}
+	
+	// MAC address lookup
+	if s.config.EnableMACLookup {
+		s.lookupMAC(result)
+	}
+	
+	return result
+}
+
+// TCP connect scan
+func (s *Scanner) tcpConnect(host string, port int) *EnhancedScanResult {
+	timeout := time.Duration(s.config.ScanTimeout) * time.Millisecond
+	if timeout <= 0 {
+		timeout = DEFAULT_TIMEOUT * time.Millisecond
+	}
+	
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	if err != nil {
+		if isTimeout(err) {
+			return &EnhancedScanResult{
+				Host:     host,
+				Port:     port,
+				Protocol: "tcp",
+				State:    "filtered",
+			}
+		}
+		return &EnhancedScanResult{
+			Host:     host,
+			Port:     port,
+			Protocol: "tcp",
+			State:    "closed",
+		}
+	}
+	defer conn.Close()
+	
+	s.metrics.OpenPorts.Add(1)
+	
+	result := &EnhancedScanResult{
+		Host:     host,
+		Port:     port,
+		Protocol: "tcp",
+		State:    "open",
+	}
+	
+	// Grab banner if possible
+	if s.config.ServiceDetect {
+		serviceTimeout := time.Duration(s.config.ServiceDetectTimeout) * time.Millisecond
+		if serviceTimeout <= 0 {
+			serviceTimeout = DEFAULT_SERVICE_TIMEOUT * time.Millisecond
+		}
+		
+		if serviceInfo := detectServiceWithTimeout(conn, port, "tcp", serviceTimeout); serviceInfo != nil {
+			result.Service = serviceInfo.ServiceName
+			result.Version = serviceInfo.ServiceVersion
+			result.DetectionConfidence = serviceInfo.Confidence
+			result.ALPNProtocol = serviceInfo.ALPNProtocol
+			if serviceInfo.TLSInfo != nil {
+				result.TLSCommonName = serviceInfo.TLSInfo.CommonName
+			}
+		}
+	}
+	
+	return result
+}
+
+// SYN scan implementation
+func (s *Scanner) synScan(host string, port int) *EnhancedScanResult {
+	// Basic SYN scan implementation
+	// This is a simplified version - full implementation would involve raw sockets
+	timeout := time.Duration(s.config.ScanTimeout) * time.Millisecond
+	if timeout <= 0 {
+		timeout = DEFAULT_TIMEOUT * time.Millisecond
+	}
+	
+	// Try to connect briefly to check if port is open
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	if err != nil {
+		if isTimeout(err) {
+			return &EnhancedScanResult{
+				Host:     host,
+				Port:     port,
+				Protocol: "tcp",
+				State:    "filtered",
+			}
+		}
+		return &EnhancedScanResult{
+			Host:     host,
+			Port:     port,
+			Protocol: "tcp",
+			State:    "closed",
+		}
+	}
+	conn.Close()
+	
+	s.metrics.OpenPorts.Add(1)
+	return &EnhancedScanResult{
+		Host:     host,
+		Port:     port,
+		Protocol: "tcp",
+		State:    "open",
+	}
+}
+
+// UDP scan implementation
+func (s *Scanner) udpScan(host string, port int) *EnhancedScanResult {
+	timeout := time.Duration(s.config.ScanTimeout) * time.Millisecond
+	if timeout <= 0 {
+		timeout = DEFAULT_TIMEOUT * time.Millisecond
+	}
+	
+	conn, err := net.DialTimeout("udp", fmt.Sprintf("%s:%d", host, port), timeout)
+	if err != nil {
+		return &EnhancedScanResult{
+			Host:     host,
+			Port:     port,
+			Protocol: "udp",
+			State:    "closed",
+		}
+	}
+	defer conn.Close()
+	
+	// Send a probe packet
+	_, err = conn.Write([]byte("probe"))
+	if err != nil {
+		return &EnhancedScanResult{
+			Host:     host,
+			Port:     port,
+			Protocol: "udp",
+			State:    "closed",
+		}
+	}
+	
+	// Try to read response with timeout
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	buffer := make([]byte, 1024)
+	_, err = conn.Read(buffer)
+	
+	// UDP is tricky - lack of response doesn't mean closed
+	return &EnhancedScanResult{
+		Host:     host,
+		Port:     port,
+		Protocol: "udp",
+		State:    "open|filtered",
+	}
+}
+
+// ICMP ping implementation
+func (s *Scanner) isHostAliveICMP(host string, timeout time.Duration) bool {
+	// Simplified ICMP ping
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	
+	dst, err := net.ResolveIPAddr("ip4", host)
+	if err != nil {
+		return false
+	}
+	
+	// Create ICMP message
+	message := &icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   os.Getpid() & 0xffff,
+			Seq:  1,
+			Data: []byte("Hello, World!"),
+		},
+	}
+	
+	data, err := message.Marshal(nil)
+	if err != nil {
+		return false
+	}
+	
+	// Send ping
+	_, err = conn.WriteTo(data, dst)
+	if err != nil {
+		return false
+	}
+	
+	// Wait for reply
+	err = conn.SetReadDeadline(time.Now().Add(timeout))
+	if err != nil {
+		return false
+	}
+	
+	reply := make([]byte, 1500)
+	_, _, err = conn.ReadFrom(reply)
+	return err == nil
+}
+
+// TCP ping implementation
+func (s *Scanner) isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
+	for _, port := range ports {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// Service detection
+func (s *Scanner) detectService(result *EnhancedScanResult) {
+	// Use probe engine if available
+	if s.probeEngine != nil {
+		if serviceInfo := s.probeEngine.DetectService(result.Host, result.Port, result.Protocol); serviceInfo != nil {
+			result.Service = serviceInfo.ServiceName
+			result.Version = serviceInfo.ServiceVersion
+			result.DetectionConfidence = serviceInfo.Confidence
+			result.ALPNProtocol = serviceInfo.ALPNProtocol
+			if serviceInfo.TLSInfo != nil {
+				result.TLSCommonName = serviceInfo.TLSInfo.CommonName
+			}
+		}
+	}
+}
+
+// Version detection
+func (s *Scanner) detectVersion(result *EnhancedScanResult) {
+	// Enhanced version detection would go here
+	// For now, use basic banner grabbing
+	if result.Service != "" {
+		result.Version = "detected"
+	}
+}
+
+// OS detection
+func (s *Scanner) detectOS(result *EnhancedScanResult) {
+	// OS fingerprinting implementation
+	if s.fingerprintDB != nil {
+		// Use fingerprint database for OS detection
+		result.OS = "Unknown"
+	}
+}
+
+// Vulnerability mapping
+func (s *Scanner) mapVulnerabilities(result *EnhancedScanResult) {
+	if result.Service == "" {
+		return
+	}
+	
+	// Check local vulnerability database
+	serviceKey := fmt.Sprintf("%s %s", result.Service, result.Version)
+	if vulns, exists := vulnDB[serviceKey]; exists {
+		result.Vulnerabilities = vulns
+	}
+	
+	// Use CVE database if available
+	if s.vulnDB != nil {
+		if cves := s.vulnDB.SearchCVEs(result.Service, result.Version); len(cves) > 0 {
+			result.CVEs = cves
+		}
+	}
+}
+
+// MAC address lookup
+func (s *Scanner) lookupMAC(result *EnhancedScanResult) {
+	// ARP lookup for MAC address (simplified)
+	if result.MACAddress != "" {
+		prefix := result.MACAddress[:8]
+		if vendor, exists := s.ouiData[strings.ToUpper(prefix)]; exists {
+			result.MACVendor = vendor
+		}
+	}
+}
+
+// Process results
+func (s *Scanner) processResults() {
+	for result := range s.results {
+		if result == nil {
+			continue
+		}
+		
+		// Filter results if needed
+		if s.config.OnlyOpenPorts && result.State != "open" {
+			continue
+		}
+		
+		// Store result
+		mutex.Lock()
+		results = append(results, *result)
+		mutex.Unlock()
+		
+		// Log result if verbose
+		if s.config.Verbose {
+			s.logger.Info().
+				Str("host", result.Host).
+				Int("port", result.Port).
+				Str("protocol", result.Protocol).
+				Str("state", result.State).
+				Str("service", result.Service).
+				Msg("Port scan result")
+		}
+	}
+}
+
+// Handle errors
+func (s *Scanner) handleErrors() {
+	for err := range s.errors {
+		if err != nil {
+			s.logger.Error().Err(err).Msg("Scan error")
+			s.metrics.Errors.Add(1)
+		}
+	}
+}
+
+// Print summary
+func (s *Scanner) printSummary() {
+	duration := s.metrics.EndTime.Sub(s.metrics.StartTime)
+	
+	fmt.Printf("\n=== SCAN SUMMARY ===\n")
+	fmt.Printf("Duration: %v\n", duration)
+	fmt.Printf("Total Hosts: %d\n", s.metrics.TotalHosts.Load())
+	fmt.Printf("Total Ports: %d\n", s.metrics.TotalPorts.Load())
+	fmt.Printf("Open Ports: %d\n", s.metrics.OpenPorts.Load())
+	fmt.Printf("Closed Ports: %d\n", s.metrics.ClosedPorts.Load())
+	fmt.Printf("Filtered Ports: %d\n", s.metrics.FilteredPorts.Load())
+	fmt.Printf("Packets Sent: %d\n", s.metrics.PacketsSent.Load())
+	fmt.Printf("Packets Received: %d\n", s.metrics.PacketsReceived.Load())
+	fmt.Printf("Errors: %d\n", s.metrics.Errors.Load())
+	
+	// Print open ports
+	fmt.Printf("\n=== OPEN PORTS ===\n")
+	mutex.Lock()
+	for _, result := range results {
+		if result.State == "open" {
+			fmt.Printf("%s:%d/%s %s %s\n", 
+				result.Host, result.Port, result.Protocol, 
+				result.Service, result.Version)
+		}
+	}
+	mutex.Unlock()
+}
+
+// Load custom CVEs
+func (s *Scanner) loadCustomCVEs() {
+	if s.config.CVEPluginFile == "" {
+		return
+	}
+	
+	file, err := os.Open(s.config.CVEPluginFile)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Failed to open CVE plugin file")
+		return
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			service := strings.TrimSpace(parts[0])
+			cve := strings.TrimSpace(parts[1])
+			s.customCVEs[service] = append(s.customCVEs[service], cve)
+		}
+	}
+}
+
+// Cleanup resources
+func (s *Scanner) cleanup() {
+	// Close pcap handle
+	if s.pcapHandle != nil {
+		s.pcapHandle.Close()
+	}
+	
+	// Close raw socket
+	if s.rawSocket != 0 {
+		unix.Close(s.rawSocket)
+	}
+	
+	// Close database
+	if s.db != nil {
+		s.db.Close()
+	}
+	
+	// Cancel context
+	s.cancel()
+}
+
+// Helper functions
+func isTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Timeout()
+	}
+	return false
+}
+
+func incIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
+}
+
+func parsePortRange(portRangeStr string) []int {
+	var ports []int
+	seen := make(map[int]bool)
+	
+	ranges := strings.Split(portRangeStr, ",")
+	for _, r := range ranges {
+		r = strings.TrimSpace(r)
+		if strings.Contains(r, "-") {
+			parts := strings.SplitN(r, "-", 2)
+			if len(parts) == 2 {
+				start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+				end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+				if err1 == nil && err2 == nil && start > 0 && end > 0 && start <= 65535 && end <= 65535 && start <= end {
+					for i := start; i <= end; i++ {
+						if !seen[i] {
+							ports = append(ports, i)
+							seen[i] = true
+						}
+					}
+				}
+			}
+		} else {
+			port, err := strconv.Atoi(r)
+			if err == nil && port > 0 && port <= 65535 {
+				if !seen[port] {
+					ports = append(ports, port)
+					seen[port] = true
+				}
+			}
+		}
+	}
+	
+	return ports
+}
+
+func getTopPorts(n int) []int {
+	topPorts := []int{
+		21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
+		1723, 3306, 3389, 5900, 8080, 8443, 8888, 10000, 32768, 49152, 49153,
+		49154, 49155, 49156, 49157, 1433, 1521, 1434, 5432, 5984, 6379, 7001,
+		8020, 8086, 9200, 9300, 11211, 27017, 27018, 27019, 50000, 50070,
+		2049, 2181, 3000, 3001, 4444, 5000, 5001, 5060, 5555, 5601, 5672,
+		6000, 6001, 6666, 7000, 7002, 8000, 8001, 8081, 8090, 8099, 8181,
+		8649, 8834, 9000, 9001, 9090, 9091, 9999, 10001, 10002, 15672,
+		27015, 28015, 29015, 30000, 31337, 32764, 32769, 49160, 49161,
+	}
+	
+	if n > len(topPorts) {
+		n = len(topPorts)
+	}
+	
+	return topPorts[:n]
+}
+
+// Additional stub functions that need to be implemented
+func NewServiceDatabase(cacheDir string) *ServiceDatabase {
+	cache, _ := lru.New[string, *ServiceInfo](1000)
+	return &ServiceDatabase{
+		patterns: make(map[string][]*ServicePattern),
+		cache:    cache,
+	}
+}
+
+func NewFingerprintDatabase() *FingerprintDatabase {
+	return &FingerprintDatabase{
+		os:      make(map[string]*OSFingerprint),
+		service: make(map[string]*ServiceFingerprint),
+		app:     make(map[string]*AppFingerprint),
+	}
+}
+
+func NewVulnerabilityDatabase(cacheDir, apiKey string) *VulnerabilityDatabase {
+	cache, _ := lru.New[string, []*CVEInfo](1000)
+	return &VulnerabilityDatabase{
+		cache:     cache,
+		apiKey:    apiKey,
+		rateLimit: limiter,
+	}
+}
+
+func (vdb *VulnerabilityDatabase) SearchCVEs(service, version string) []*CVEInfo {
+	// Search for CVEs related to the service and version
+	var cves []*CVEInfo
+	
+	// Check cache first
+	key := fmt.Sprintf("%s:%s", service, version)
+	if cached, ok := vdb.cache.Get(key); ok {
+		return cached
+	}
+	
+	// Simple lookup in local database
+	serviceKey := fmt.Sprintf("%s %s", service, version)
+	if vulns, exists := vulnDB[serviceKey]; exists {
+		for _, vuln := range vulns {
+			cve := &CVEInfo{
+				ID:          vuln,
+				CVSS:        7.5, // Default CVSS score
+				Severity:    "HIGH",
+				Description: fmt.Sprintf("Vulnerability in %s %s", service, version),
+				Published:   time.Now().AddDate(-1, 0, 0), // Mock date
+				References:  []string{fmt.Sprintf("https://cve.mitre.org/cgi-bin/cvename.cgi?name=%s", vuln)},
+			}
+			cves = append(cves, cve)
+		}
+	}
+	
+	// Cache the result
+	vdb.cache.Add(key, cves)
+	return cves
+}
+
+func NewScriptEngine() *ScriptEngine {
+	return &ScriptEngine{
+		scripts: make(map[string]*Script),
+		timeout: 30 * time.Second,
+	}
+}
+
+func (se *ScriptEngine) LoadScripts() error {
+	// Load NSE-like scripts
+	return nil
+}
+
+func NewMLEngine() *MLEngine {
+	return &MLEngine{
+		threshold: 0.8,
+	}
+}
+
+func (ml *MLEngine) LoadModel() error {
+	// Load ML model for intelligent scanning
+	return nil
+}
+
+func NewWorkerPool(workers int, ctx context.Context) *WorkerPool {
+	ctx, cancel := context.WithCancel(ctx)
+	return &WorkerPool{
+		workers: workers,
+		queue:   make(chan Task, workers*2),
+		results: make(chan interface{}, workers),
+		errors:  make(chan error, workers),
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+}
+
+// Probe engine implementation
+func NewProbeEngine(probeFilePaths ...string) (*ProbeEngine, error) {
+	engine := &ProbeEngine{
+		probesByName: make(map[string]*ProbeDefinition),
+	}
+	
+	// Load default probes
+	engine.loadDefaultProbes()
+	
+	// Load custom probe files if provided
+	for _, path := range probeFilePaths {
+		if err := engine.loadProbeFile(path); err != nil {
+			return nil, fmt.Errorf("failed to load probe file %s: %w", path, err)
+		}
+	}
+	
+	return engine, nil
+}
+
+func (pe *ProbeEngine) loadDefaultProbes() {
+	// HTTP probe
+	pe.probes = append(pe.probes, ProbeDefinition{
+		Name:            "HTTP",
+		Protocol:        "tcp",
+		Ports:           []int{80, 8080, 8000, 8081, 8090},
+		Priority:        1,
+		SendPayload:     "GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: r3cond0g/3.0\r\nConnection: close\r\n\r\n",
+		ReadPattern:     "HTTP/\\d\\.\\d (\\d+)",
+		ServiceOverride: "http",
+		TimeoutMs:       5000,
+	})
+	
+	// HTTPS probe
+	pe.probes = append(pe.probes, ProbeDefinition{
+		Name:             "HTTPS",
+		Protocol:         "tcp",
+		Ports:            []int{443, 8443, 8834},
+		Priority:         1,
+		RequiresTLS:      true,
+		TLSALPNProtocols: []string{"http/1.1", "h2"},
+		SendPayload:      "GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: r3cond0g/3.0\r\nConnection: close\r\n\r\n",
+		ReadPattern:      "HTTP/\\d\\.\\d (\\d+)",
+		ServiceOverride:  "https",
+		TimeoutMs:        5000,
+	})
+	
+	// SSH probe
+	pe.probes = append(pe.probes, ProbeDefinition{
+		Name:            "SSH",
+		Protocol:        "tcp",
+		Ports:           []int{22, 2222},
+		Priority:        1,
+		ReadPattern:     "SSH-([0-9.]+)",
+		ServiceOverride: "ssh",
+		TimeoutMs:       3000,
+	})
+	
+	// FTP probe
+	pe.probes = append(pe.probes, ProbeDefinition{
+		Name:            "FTP",
+		Protocol:        "tcp",
+		Ports:           []int{21},
+		Priority:        1,
+		ReadPattern:     "220[- ](.+)",
+		ServiceOverride: "ftp",
+		TimeoutMs:       3000,
+	})
+	
+	// Compile regex patterns
+	for i := range pe.probes {
+		if pe.probes[i].ReadPattern != "" {
+			pe.probes[i].compiledRegex = regexp.MustCompile(pe.probes[i].ReadPattern)
+		}
+		pe.probesByName[pe.probes[i].Name] = &pe.probes[i]
+	}
+}
+
+func (pe *ProbeEngine) loadProbeFile(path string) error {
+	// Load custom probe definitions from file
+	// This would parse JSON/YAML probe definitions
+	return nil
+}
+
+func (pe *ProbeEngine) DetectService(host string, port int, protocol string) *ServiceInfo {
+	// Find matching probes for this port
+	var matchingProbes []ProbeDefinition
+	for _, probe := range pe.probes {
+		if probe.Protocol == protocol {
+			for _, p := range probe.Ports {
+				if p == port {
+					matchingProbes = append(matchingProbes, probe)
+					break
+				}
+			}
+		}
+	}
+	
+	// If no specific probes found, try generic probes
+	if len(matchingProbes) == 0 {
+		for _, probe := range pe.probes {
+			if probe.Protocol == protocol && len(probe.Ports) == 0 {
+				matchingProbes = append(matchingProbes, probe)
+			}
+		}
+	}
+	
+	// Try each probe
+	for _, probe := range matchingProbes {
+		if info := pe.runProbe(host, port, &probe); info != nil {
+			return info
+		}
+	}
+	
+	return nil
+}
+
+func (pe *ProbeEngine) runProbe(host string, port int, probe *ProbeDefinition) *ServiceInfo {
+	timeout := time.Duration(probe.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	
+	var conn net.Conn
+	var err error
+	
+	if probe.RequiresTLS {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+			NextProtos:         probe.TLSALPNProtocols,
+		}
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", fmt.Sprintf("%s:%d", host, port), tlsConfig)
+	} else {
+		conn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
+	}
+	
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	
+	conn.SetDeadline(time.Now().Add(timeout))
+	
+	// Send probe payload if specified
+	if probe.SendPayload != "" {
+		payload := fmt.Sprintf(probe.SendPayload, host)
+		_, err = conn.Write([]byte(payload))
+		if err != nil {
+			return nil
+		}
+	}
+	
+	// Read response
+	buffer := make([]byte, 4096)
+	n, err := conn.Read(buffer)
+	if err != nil && n == 0 {
+		return nil
+	}
+	
+	response := string(buffer[:n])
+	
+	// Match against pattern
+	info := &ServiceInfo{
+		ServiceName: probe.ServiceOverride,
+		Confidence:  50, // Base confidence
+	}
+	
+	if probe.compiledRegex != nil {
+		matches := probe.compiledRegex.FindStringSubmatch(response)
+		if len(matches) > 1 {
+			info.ServiceVersion = matches[1]
+			info.Confidence = 90 // High confidence for regex match
+		}
+	}
+	
+	// Extract TLS info if TLS connection
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		state := tlsConn.ConnectionState()
+		if len(state.PeerCertificates) > 0 {
+			cert := state.PeerCertificates[0]
+			info.TLSInfo = &TLSInfo{
+				CommonName:         cert.Subject.CommonName,
+				SubjectAltNames:    cert.DNSNames,
+				Issuer:             cert.Issuer.CommonName,
+				NotBefore:          cert.NotBefore.Format(time.RFC3339),
+				NotAfter:           cert.NotAfter.Format(time.RFC3339),
+				SignatureAlgorithm: cert.SignatureAlgorithm.String(),
+			}
+		}
+		info.ALPNProtocol = state.NegotiatedProtocol
+	}
+	
+	if info.ServiceName != "" {
+		return info
+	}
+	
+	return nil
+}
+
+func detectServiceWithTimeout(conn net.Conn, port int, protocol string, timeout time.Duration) *ServiceInfo {
+	// Basic service detection with timeout
+	conn.SetReadDeadline(time.Now().Add(timeout))
+	
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil || n == 0 {
+		return &ServiceInfo{
+			ServiceName: "unknown",
+			Confidence:  10,
+		}
+	}
+	
+	banner := string(buffer[:n])
+	
+	// Simple banner-based detection
+	info := &ServiceInfo{
+		ServiceName: "unknown",
+		Confidence:  30,
+	}
+	
+	// HTTP detection
+	if strings.Contains(banner, "HTTP/") {
+		info.ServiceName = "http"
+		info.Confidence = 80
+		if match := regexp.MustCompile(`Server:\s*([^\r\n]+)`).FindStringSubmatch(banner); len(match) > 1 {
+			info.ServiceVersion = match[1]
+			info.Confidence = 90
+		}
+	}
+	
+	// SSH detection
+	if strings.HasPrefix(banner, "SSH-") {
+		info.ServiceName = "ssh"
+		info.Confidence = 95
+		if match := regexp.MustCompile(`SSH-([0-9.]+)`).FindStringSubmatch(banner); len(match) > 1 {
+			info.ServiceVersion = match[1]
+		}
+	}
+	
+	// FTP detection
+	if strings.HasPrefix(banner, "220") && (strings.Contains(banner, "FTP") || strings.Contains(banner, "ftp")) {
+		info.ServiceName = "ftp"
+		info.Confidence = 85
+	}
+	
+	return info
+}
+
+// Main function for testing
+func main() {
+	// Example configuration
+	config := &Config{
+		Targets:        []string{"127.0.0.1"},
+		Ports:          "22,80,443,8080",
+		MaxConcurrency: 50,
+		ScanTimeout:    1000,
+		ServiceDetect:  true,
+		Verbose:        true,
+		DBPath:         "./r3cond0g.db",
+		CacheDir:       "./cache",
+	}
+	
+	// Create scanner
+	scanner, err := NewScanner(config)
+	if err != nil {
+		fmt.Printf("Error creating scanner: %v\n", err)
+		return
+	}
+	
+	// Run scan
+	if err := scanner.Scan(); err != nil {
+		fmt.Printf("Error running scan: %v\n", err)
+		return
+	}
+}package main
 
 import (
 	"bufio"
@@ -10,31 +880,23 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/alphadose/haxmap"
 	"github.com/dgraph-io/badger/v4"
-	"github.com/fatih/color"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"github.com/gosuri/uitable"
 	"github.com/hashicorp/golang-lru/v2"
-	"github.com/klauspost/compress/zstd"
 	"github.com/miekg/dns"
 	"github.com/projectdiscovery/blackrock"
 	"github.com/projectdiscovery/mapcidr"
 	"github.com/rs/zerolog"
 	"github.com/schollz/progressbar/v3"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/mem"
-	"github.com/spf13/cobra"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/tevino/abool/v2"
 	"github.com/valyala/fasthttp"
@@ -720,10 +1582,7 @@ func NewScanner(cfg *Config) (*Scanner, error) {
 	}
 	
 	// Initialize Blackrock for random port shuffling
-	br, err := blackrock.New(65536, time.Now().UnixNano())
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize blackrock: %w", err)
-	}
+	br := blackrock.New(65536, time.Now().UnixNano())
 	
 	// Initialize CIDR ranger
 	ranger := cidranger.NewPCTrieRanger()
@@ -1144,10 +2003,15 @@ func (s *Scanner) parseAllPorts() []int {
 		allPorts = append(allPorts, getTopPorts(s.config.TopPorts)...)
 	}
 	
+	// Default ports if none specified
+	if len(allPorts) == 0 {
+		allPorts = getTopPorts(1000)
+	}
+	
 	// Deduplicate
 	var finalPorts []int
 	for _, port := range allPorts {
-		if !seen[port] {
+		if !seen[port] && port > 0 && port <= 65535 {
 			finalPorts = append(finalPorts, port)
 			seen[port] = true
 		}
@@ -1157,7 +2021,7 @@ func (s *Scanner) parseAllPorts() []int {
 	if s.config.FastMode || s.config.UltraFastMode {
 		shuffled := make([]int, len(finalPorts))
 		for i, port := range finalPorts {
-			shuffled[i] = int(s.blackrock.Shuffle(uint32(port)))
+			shuffled[i] = int(s.blackrock.Shuffle(uint64(port)))
 		}
 		finalPorts = shuffled
 	}
@@ -1320,336 +2184,4 @@ func (s *Scanner) performPortScanning(hosts []string, ports []int) {
 	}
 }
 
-// Scan a single port
-func (s *Scanner) scanPort(host string, port int, protocol string) *EnhancedScanResult {
-	startTime := time.Now()
-	
-	var result *EnhancedScanResult
-	
-	switch protocol {
-	case "tcp":
-		if s.config.SYNScan {
-			result = s.synScan(host, port)
-		} else {
-			result = s.tcpConnect(host, port)
-		}
-	case "udp":
-		result = s.udpScan(host, port)
-	}
-	
-	if result == nil {
-		return nil
-	}
-	
-	result.ResponseTime = time.Since(startTime)
-	result.Timestamp = time.Now()
-	
-	// Service detection
-	if result.State == "open" && s.config.ServiceDetect {
-		s.detectService(result)
-	}
-	
-	// Version detection
-	if result.State == "open" && s.config.VersionDetect {
-		s.detectVersion(result)
-	}
-	
-	// OS detection
-	if result.State == "open" && s.config.OSDetect {
-		s.detectOS(result)
-	}
-	
-	// Vulnerability mapping
-	if result.State == "open" && s.config.VulnMapping {
-		s.mapVulnerabilities(result)
-	}
-	
-	// MAC address lookup
-	if s.config.EnableMACLookup {
-		s.lookupMAC(result)
-	}
-	
-	return result
-}
-
-// TCP connect scan
-func (s *Scanner) tcpConnect(host string, port int) *EnhancedScanResult {
-	timeout := time.Duration(s.config.ScanTimeout) * time.Millisecond
-	if timeout <= 0 {
-		timeout = DEFAULT_TIMEOUT * time.Millisecond
-	}
-	
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), timeout)
-	if err != nil {
-		if isTimeout(err) {
-			return &EnhancedScanResult{
-				Host:     host,
-				Port:     port,
-				Protocol: "tcp",
-				State:    "filtered",
-			}
-		}
-		return &EnhancedScanResult{
-			Host:     host,
-			Port:     port,
-			Protocol: "tcp",
-			State:    "closed",
-		}
-	}
-	defer conn.Close()
-	
-	s.metrics.OpenPorts.Add(1)
-	
-	result := &EnhancedScanResult{
-		Host:     host,
-		Port:     port,
-		Protocol: "tcp",
-		State:    "open",
-	}
-	
-	// Grab banner if possible
-	if s.config.ServiceDetect {
-		serviceTimeout := time.Duration(s.config.ServiceDetectTimeout) * time.Millisecond
-		if serviceTimeout <= 0 {
-			serviceTimeout = DEFAULT_SERVICE_TIMEOUT * time.Millisecond
-		}
-		
-		if serviceInfo := detectServiceWithTimeout(conn, port, "tcp", serviceTimeout); serviceInfo != nil {
-			result.Service = serviceInfo.ServiceName
-			result.Version = serviceInfo.ServiceVersion
-			result.DetectionConfidence = serviceInfo.Confidence
-			result.ALPNProtocol = serviceInfo.ALPNProtocol
-			if serviceInfo.TLSInfo != nil {
-				result.TLSCommonName = serviceInfo.TLSInfo.CommonName
-			}
-		}
-	}
-	
-	return result
-}
-
-// Helper functions
-func isTimeout(err error) bool {
-	if err == nil {
-		return false
-	}
-	if netErr, ok := err.(net.Error); ok {
-		return netErr.Timeout()
-	}
-	return false
-}
-
-func incIP(ip net.IP) {
-	for j := len(ip) - 1; j >= 0; j-- {
-		ip[j]++
-		if ip[j] > 0 {
-			break
-		}
-	}
-}
-
-func parsePortRange(portRangeStr string) []int {
-	var ports []int
-	seen := make(map[int]bool)
-	
-	ranges := strings.Split(portRangeStr, ",")
-	for _, r := range ranges {
-		r = strings.TrimSpace(r)
-		if strings.Contains(r, "-") {
-			parts := strings.SplitN(r, "-", 2)
-			if len(parts) == 2 {
-				start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-				end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-				if err1 == nil && err2 == nil && start > 0 && end > 0 && start <= 65535 && end <= 65535 && start <= end {
-					for i := start; i <= end; i++ {
-						if !seen[i] {
-							ports = append(ports, i)
-							seen[i] = true
-						}
-					}
-				}
-			}
-		} else {
-			port, err := strconv.Atoi(r)
-			if err == nil && port > 0 && port <= 65535 {
-				if !seen[port] {
-					ports = append(ports, port)
-					seen[port] = true
-				}
-			}
-		}
-	}
-	
-	return ports
-}
-
-func getTopPorts(n int) []int {
-	topPorts := []int{
-		21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
-		1723, 3306, 3389, 5900, 8080, 8443, 8888, 10000, 32768, 49152, 49153,
-		49154, 49155, 49156, 49157, 1433, 1521, 1434, 5432, 5984, 6379, 7001,
-		8020, 8086, 9200, 9300, 11211, 27017, 27018, 27019, 50000, 50070,
-		2049, 2181, 3000, 3001, 4444, 5000, 5001, 5060, 5555, 5601, 5672,
-		6000, 6001, 6666, 7000, 7002, 8000, 8001, 8081, 8090, 8099, 8181,
-		8649, 8834, 9000, 9001, 9090, 9091, 9999, 10001, 10002, 15672,
-		27015, 28015, 29015, 30000, 31337, 32764, 32769, 49160, 49161,
-	}
-	
-	if n > len(topPorts) {
-		n = len(topPorts)
-	}
-	
-	return topPorts[:n]
-}
-
-// Cleanup resources
-func (s *Scanner) cleanup() {
-	// Close pcap handle
-	if s.pcapHandle != nil {
-		s.pcapHandle.Close()
-	}
-	
-	// Close raw socket
-	if s.rawSocket != 0 {
-		unix.Close(s.rawSocket)
-	}
-	
-	// Close database
-	if s.db != nil {
-		s.db.Close()
-	}
-	
-	// Cancel context
-	s.cancel()
-}
-
-// Additional stub functions that need to be implemented
-func NewServiceDatabase(cacheDir string) *ServiceDatabase {
-	return &ServiceDatabase{
-		patterns: make(map[string][]*ServicePattern),
-	}
-}
-
-func NewFingerprintDatabase() *FingerprintDatabase {
-	return &FingerprintDatabase{
-		os:      make(map[string]*OSFingerprint),
-		service: make(map[string]*ServiceFingerprint),
-		app:     make(map[string]*AppFingerprint),
-	}
-}
-
-func NewVulnerabilityDatabase(cacheDir, apiKey string) *VulnerabilityDatabase {
-	return &VulnerabilityDatabase{
-		apiKey:    apiKey,
-		rateLimit: limiter,
-	}
-}
-
-func NewScriptEngine() *ScriptEngine {
-	return &ScriptEngine{
-		scripts: make(map[string]*Script),
-		timeout: 30 * time.Second,
-	}
-}
-
-func (se *ScriptEngine) LoadScripts() error {
-	// Load NSE-like scripts
-	return nil
-}
-
-func NewMLEngine() *MLEngine {
-	return &MLEngine{
-		threshold: 0.8,
-	}
-}
-
-func (ml *MLEngine) LoadModel() error {
-	// Load ML model for intelligent scanning
-	return nil
-}
-
-func NewWorkerPool(workers int, ctx context.Context) *WorkerPool {
-	return &WorkerPool{
-		workers: workers,
-		queue:   make(chan Task, workers*2),
-		results: make(chan interface{}, workers),
-		errors:  make(chan error, workers),
-		ctx:     ctx,
-	}
-}
-
-// Stub implementations for missing methods
-func (s *Scanner) synScan(host string, port int) *EnhancedScanResult {
-	// SYN scan implementation
-	return nil
-}
-
-func (s *Scanner) udpScan(host string, port int) *EnhancedScanResult {
-	// UDP scan implementation
-	return nil
-}
-
-func (s *Scanner) isHostAliveICMP(host string, timeout time.Duration) bool {
-	// ICMP ping implementation
-	return false
-}
-
-func (s *Scanner) isHostAliveTCP(host string, ports []int, timeout time.Duration) bool {
-	// TCP ping implementation
-	return false
-}
-
-func (s *Scanner) detectService(result *EnhancedScanResult) {
-	// Service detection implementation
-}
-
-func (s *Scanner) detectVersion(result *EnhancedScanResult) {
-	// Version detection implementation
-}
-
-func (s *Scanner) detectOS(result *EnhancedScanResult) {
-	// OS detection implementation
-}
-
-func (s *Scanner) mapVulnerabilities(result *EnhancedScanResult) {
-	// Vulnerability mapping implementation
-}
-
-func (s *Scanner) lookupMAC(result *EnhancedScanResult) {
-	// MAC address lookup implementation
-}
-
-func (s *Scanner) processResults() {
-	// Result processing implementation
-}
-
-func (s *Scanner) handleErrors() {
-	// Error handling implementation
-}
-
-func (s *Scanner) printSummary() {
-	// Summary printing implementation
-}
-
-func (s *Scanner) loadCustomCVEs() {
-	// Load custom CVE database
-}
-
-// Probe engine implementation (from older version)
-func NewProbeEngine(probeFilePaths ...string) (*ProbeEngine, error) {
-	engine := &ProbeEngine{
-		probesByName: make(map[string]*ProbeDefinition),
-	}
-	
-	// Implementation from older version
-	return engine, nil
-}
-
-func detectServiceWithTimeout(conn net.Conn, port int, protocol string, timeout time.Duration) *ServiceInfo {
-	// Service detection with timeout
-	return &ServiceInfo{
-		ServiceName:    "unknown",
-		ServiceVersion: "unknown",
-		Confidence:     0,
-	}
-}
+//
